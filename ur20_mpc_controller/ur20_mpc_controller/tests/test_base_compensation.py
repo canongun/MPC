@@ -4,6 +4,7 @@ import rospy
 import numpy as np
 import matplotlib.pyplot as plt
 import actionlib
+import moveit_commander
 from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryGoal
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from ur20_mpc_controller.models.ur_mpc import URMPC
@@ -11,6 +12,14 @@ from ur20_mpc_controller.models.ur_mpc import URMPC
 def test_base_compensation():
     """Test the MPC controller with base motion compensation"""
     rospy.init_node('test_base_compensation')
+    
+    # Initialize MoveIt
+    moveit_commander.roscpp_initialize([])
+    robot = moveit_commander.RobotCommander()
+    move_group = moveit_commander.MoveGroupCommander("arm")
+    
+    # Get current joint positions instead of zeros
+    current_joint_positions = np.array(move_group.get_current_joint_values())
     
     # Initialize controller
     controller = URMPC()
@@ -27,12 +36,17 @@ def test_base_compensation():
     
     rate = rospy.Rate(10)  # 10 Hz
     
-    # Test parameters
-    radius = 0.5  # meters
-    frequency = 0.2  # Hz
-    duration = 10.0  # seconds
-    dt = 0.1
-    times = np.arange(0, duration, dt)
+    # Get initial end-effector pose
+    initial_pose = move_group.get_current_pose().pose
+    current_ee_pose = {
+        'position': np.array([
+            initial_pose.position.x,
+            initial_pose.position.y,
+            initial_pose.position.z
+        ]),
+        'orientation': np.zeros(3)
+    }
+    target_ee_pose = current_ee_pose.copy()  # Try to maintain initial pose
     
     # Initialize storage for plotting
     base_positions = []
@@ -41,34 +55,33 @@ def test_base_compensation():
     
     # Initial states
     current_joint_state = {
-        'position': np.zeros(6),
+        'position': current_joint_positions,
         'velocity': np.zeros(6)
     }
     
-    current_ee_pose = {
-        'position': np.array([0.5, 0, 0.5]),
-        'orientation': np.zeros(3)
-    }
+    times = np.arange(0, 10.0, 0.1)
     
-    target_ee_pose = current_ee_pose.copy()  # Try to maintain initial pose
-    
-    current_joint_positions = np.zeros(6)  # Track joint positions
-
     for t in times:
         if rospy.is_shutdown():
             break
             
-        # Generate circular base motion
-        base_x = radius * np.cos(2 * np.pi * frequency * t)
-        base_y = radius * np.sin(2 * np.pi * frequency * t)
-        base_vel_x = -2 * np.pi * frequency * radius * np.sin(2 * np.pi * frequency * t)
-        base_vel_y = 2 * np.pi * frequency * radius * np.cos(2 * np.pi * frequency * t)
+        # Simulate base motion (circular path)
+        base_x = 0.5 * np.cos(2 * np.pi * 0.2 * t)
+        base_y = 0.5 * np.sin(2 * np.pi * 0.2 * t)
+        base_vx = -2 * np.pi * 0.2 * 0.5 * np.sin(2 * np.pi * 0.2 * t)
+        base_vy = 2 * np.pi * 0.2 * 0.5 * np.cos(2 * np.pi * 0.2 * t)
         
         base_state = {
             'position': np.array([base_x, base_y, 0.0]),
             'orientation': np.zeros(3),
-            'linear_velocity': np.array([base_vel_x, base_vel_y, 0.0]),
+            'linear_velocity': np.array([base_vx, base_vy, 0.0]),
             'angular_velocity': np.zeros(3)
+        }
+        
+        # Update current joint state
+        current_joint_state = {
+            'position': current_joint_positions,
+            'velocity': np.zeros(6)  # Use actual velocities if available
         }
         
         # Compute control
@@ -79,8 +92,8 @@ def test_base_compensation():
             base_state
         )
         
-        # Integrate velocities to get positions
-        next_joint_positions = current_joint_positions + joint_velocities_cmd * dt
+        # Predict next joint positions
+        next_joint_positions = current_joint_positions + joint_velocities_cmd * 0.1
         
         # Create trajectory goal
         goal = FollowJointTrajectoryGoal()
@@ -102,7 +115,7 @@ def test_base_compensation():
         next_point = JointTrajectoryPoint()
         next_point.positions = next_joint_positions.tolist()
         next_point.velocities = joint_velocities_cmd.tolist()
-        next_point.time_from_start = rospy.Duration(dt)
+        next_point.time_from_start = rospy.Duration(0.1)
         
         goal.trajectory.points = [current_point, next_point]
         
