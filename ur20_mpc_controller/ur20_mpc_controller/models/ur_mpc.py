@@ -19,13 +19,13 @@ class URMPC:
         self.horizon = 10  # Prediction horizon
         self.dt = 0.1      # Time step (seconds)
         
-        # Adjust weights for smoother response
-        self.w_ee_pos = 2.0     # Increase position tracking weight
-        self.w_ee_ori = 0.5     # Keep orientation weight
-        self.w_control = 0.3    # Increase control effort penalty
+        # Adjust weights for better stability
+        self.w_ee_pos = 5.0     # Increase position tracking weight
+        self.w_ee_ori = 0.5     # Keep orientation weight low
+        self.w_control = 0.1    # Reduce control effort penalty for more aggressive correction
         
-        # Adjust velocity limits for smoother motion
-        self.joint_vel_limits = np.array([-2.0, 2.0])  # Reduced from ±3.0
+        # Reduce velocity limits for smoother motion
+        self.joint_vel_limits = [-1.5, 1.5]  # rad/s (reduced from ±2.0)
         
         # State and control limits
         self.joint_pos_limits = np.array([  # [min, max] for each joint
@@ -40,8 +40,8 @@ class URMPC:
         # Add joint velocity limits
         self.joint_vel_limits = [-2.0, 2.0]  # rad/s
         
-        # Add joint-specific scaling factors
-        self.joint_scales = np.array([0.3, 0.4, 0.5, 0.7, 0.8, 1.0])
+        # Adjust joint-specific scaling factors to prefer certain joints
+        self.joint_scales = np.array([1.0, 0.8, 0.6, 0.4, 0.3, 0.2])  # Prefer base joints
         
         self.base_estimator = BaseMotionEstimator()
         
@@ -115,40 +115,58 @@ class URMPC:
                       current_ee_pose: Dict,
                       target_ee_pose: Dict,
                       base_state: Dict) -> float:
-        """Compute cost with full base motion compensation"""
+        """Compute cost with improved position and orientation preservation"""
         joint_positions = x[:6]
         joint_velocities = x[6:]
         
-        # Get transformed base motion (all components)
-        base_vel = base_state['linear_velocity']
-        
-        # Ensure base_vel is 6D (linear and angular)
-        full_base_vel = np.zeros(6)
-        full_base_vel[:3] = base_vel  # First 3 components are linear velocity
-        
         try:
-            # Get Jacobian for current configuration (compute once)
+            # Get Jacobian for current configuration
             J = self._get_jacobian(joint_positions)
             
-            # Calculate desired joint velocities for compensation
-            desired_ee_vel = -full_base_vel  # Negative to compensate in all directions
-            compensation_vel = np.linalg.pinv(J) @ desired_ee_vel
+            # Split Jacobian into position and orientation parts
+            J_pos = J[:3, :]  # First 3 rows (position)
+            J_ori = J[3:, :]  # Last 3 rows (orientation)
             
-            # Cost terms (without FK computation)
-            velocity_tracking = np.sum((joint_velocities - compensation_vel)**2)
-            position_maintenance = np.sum((joint_positions - current_joint_state['position'])**2)
+            # Calculate end-effector velocities
+            ee_pos_vel = J_pos @ joint_velocities
+            ee_ori_vel = J_ori @ joint_velocities
+            
+            # Get base velocity
+            base_vel = base_state['linear_velocity']
+            
+            # Cost terms with improved weights
+            x_compensation_error = (ee_pos_vel[0] + base_vel[0])**2 * 15.0  # Increased weight for X compensation
+            y_motion_penalty = ee_pos_vel[1]**2 * 20.0    # Increased penalty for Y motion
+            z_motion_penalty = ee_pos_vel[2]**2 * 20.0    # Increased penalty for Z motion
+            orientation_cost = np.sum(ee_ori_vel**2) * 10.0
+            
+            # Position maintenance in Y and Z
+            current_pos = current_ee_pose['position']
+            target_pos = target_ee_pose['position']
+            yz_position_error = (
+                ((current_pos[1] - target_pos[1])**2 + 
+                 (current_pos[2] - target_pos[2])**2) * 15.0
+            )
+            
+            # Joint position and velocity regularization
+            joint_regularization = np.sum((joint_positions - current_joint_state['position'])**2) * 2.0
+            velocity_smoothness = np.sum(joint_velocities**2) * 0.1
             
             cost = (
-                5.0 * velocity_tracking +    # Track compensation velocities
-                2.0 * position_maintenance + # Maintain current configuration
-                0.1 * np.sum(joint_velocities**2)  # Minimize overall velocity
+                x_compensation_error +   # Primary X-direction compensation
+                y_motion_penalty +       # Strict Y-motion prevention
+                z_motion_penalty +       # Strict Z-motion prevention
+                orientation_cost +       # Orientation preservation
+                yz_position_error +      # Y,Z position maintenance
+                joint_regularization +   # Joint position maintenance
+                velocity_smoothness      # Smooth motion
             )
             
             return cost
             
         except Exception as e:
             rospy.logwarn(f"Cost function error: {str(e)}")
-            return 1e6  # High cost for failed computation
+            return 1e6
         
     def _predict_ee_position(self, 
                             joint_positions: np.ndarray, 
@@ -214,13 +232,36 @@ class URMPC:
         }
 
     def _get_constraints(self, x0: np.ndarray, current_ee_pose: Dict, base_state: Dict) -> List[Dict]:
-        """Simplified constraints"""
+        """Add stricter constraints for Y,Z stability and orientation preservation"""
         constraints = []
         
-        # Only constrain maximum velocity
+        # Velocity constraints
         constraints.append({
             'type': 'ineq',
             'fun': lambda x: self.joint_vel_limits[1] - np.abs(x[6:])
+        })
+        
+        # Add Y,Z position and orientation constraints
+        def ee_motion_constraint(x):
+            J = self._get_jacobian(x[:6])
+            ee_vel = J @ x[6:]
+            
+            # Split into position and orientation velocities
+            pos_vel = ee_vel[:3]
+            ori_vel = ee_vel[3:]
+            
+            # Stricter limits for Y,Z motion
+            pos_constraint = 0.005 - np.abs(pos_vel[1:3])  # Reduced from 0.01 to 0.005
+            ori_constraint = 0.005 - np.abs(ori_vel)       # Reduced from 0.01 to 0.005
+            
+            # Add X-direction compensation constraint
+            x_compensation = np.abs(pos_vel[0] + base_state['linear_velocity'][0]) - 0.01
+            
+            return np.concatenate([pos_constraint, ori_constraint, [x_compensation]])
+        
+        constraints.append({
+            'type': 'ineq',
+            'fun': ee_motion_constraint
         })
         
         return constraints
