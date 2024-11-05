@@ -66,23 +66,35 @@ class URMPC:
         x0[:6] = current_joint_state['position']
         
         # Set initial velocities based on transformed base motion
-        base_vel = transformed_base_state['linear_velocity'][:2]
+        base_vel = transformed_base_state['linear_velocity']
         base_vel_magnitude = np.linalg.norm(base_vel)
         
         if base_vel_magnitude > 0.01:
-            # Scale velocities based on joint position in chain
-            x0[6:] = self.joint_scales * base_vel_magnitude
+            # Get Jacobian for current configuration (compute once)
+            J = self._get_jacobian(current_joint_state['position'])
+            try:
+                # Initial velocity guess using Jacobian
+                x0[6:] = np.linalg.pinv(J) @ (-base_vel)
+            except:
+                # Fallback to scaled velocities if Jacobian inverse fails
+                x0[6:] = self.joint_scales * base_vel_magnitude
         
         try:
             result = minimize(
-                fun=lambda x: self._cost_function(x, current_ee_pose, target_ee_pose, transformed_base_state),
+                fun=lambda x: self._cost_function(
+                    x, 
+                    current_joint_state,
+                    current_ee_pose,
+                    target_ee_pose,
+                    transformed_base_state
+                ),
                 x0=x0,
                 method='SLSQP',
                 bounds=self._get_bounds(x0),
                 constraints=self._get_constraints(x0, current_ee_pose, transformed_base_state),
                 options={
-                    'ftol': 1e-6,
-                    'maxiter': 100,
+                    'ftol': 1e-4,
+                    'maxiter': 50,
                     'disp': True
                 }
             )
@@ -99,40 +111,44 @@ class URMPC:
         
     def _cost_function(self, 
                       x: np.ndarray, 
+                      current_joint_state: Dict,
                       current_ee_pose: Dict,
                       target_ee_pose: Dict,
                       base_state: Dict) -> float:
-        """Compute cost with improved base motion compensation"""
+        """Compute cost with full base motion compensation"""
         joint_positions = x[:6]
         joint_velocities = x[6:]
         
-        # Get transformed base motion
-        base_vel = base_state['linear_velocity'][:2]  # Already transformed
-        base_vel_magnitude = np.linalg.norm(base_vel)
+        # Get transformed base motion (all components)
+        base_vel = base_state['linear_velocity']
         
-        # Predict end-effector position
-        predicted_ee_pos = self._predict_ee_position(
-            joint_positions, 
-            joint_velocities,
-            current_ee_pose
-        )
+        # Ensure base_vel is 6D (linear and angular)
+        full_base_vel = np.zeros(6)
+        full_base_vel[:3] = base_vel  # First 3 components are linear velocity
         
-        # Separate XY and Z errors
-        xy_error = np.linalg.norm(predicted_ee_pos[:2] - target_ee_pose['position'][:2])
-        z_error = abs(predicted_ee_pos[2] - target_ee_pose['position'][2])
-        
-        # Compute compensation velocities with transformed motion
-        compensation_vel = -base_vel_magnitude * self.joint_scales
-        
-        # Combined cost with separate weights for XY and Z
-        cost = (
-            10.0 * xy_error +            # XY position maintenance
-            20.0 * z_error +            # Strict Z position maintenance
-            2.0 * np.sum((joint_velocities - compensation_vel)**2) +  # Track compensation velocities
-            0.1 * np.sum(joint_velocities**2)  # Minimize overall velocity
-        )
-        
-        return cost
+        try:
+            # Get Jacobian for current configuration (compute once)
+            J = self._get_jacobian(joint_positions)
+            
+            # Calculate desired joint velocities for compensation
+            desired_ee_vel = -full_base_vel  # Negative to compensate in all directions
+            compensation_vel = np.linalg.pinv(J) @ desired_ee_vel
+            
+            # Cost terms (without FK computation)
+            velocity_tracking = np.sum((joint_velocities - compensation_vel)**2)
+            position_maintenance = np.sum((joint_positions - current_joint_state['position'])**2)
+            
+            cost = (
+                5.0 * velocity_tracking +    # Track compensation velocities
+                2.0 * position_maintenance + # Maintain current configuration
+                0.1 * np.sum(joint_velocities**2)  # Minimize overall velocity
+            )
+            
+            return cost
+            
+        except Exception as e:
+            rospy.logwarn(f"Cost function error: {str(e)}")
+            return 1e6  # High cost for failed computation
         
     def _predict_ee_position(self, 
                             joint_positions: np.ndarray, 
@@ -146,22 +162,16 @@ class URMPC:
             # Check joint limits
             for i, pos in enumerate(predicted_joints):
                 if pos < self.joint_pos_limits[i][0] or pos > self.joint_pos_limits[i][1]:
-                    rospy.logwarn(f"Joint {i} position {pos} exceeds limits")
                     return current_ee_pose['position']
             
             # Use MoveIt to compute forward kinematics
-            robot_state = self.move_group.get_current_state()
-            robot_state.joint_state.position = predicted_joints.tolist()
-            fk = self.move_group.get_robot_state_fk(robot_state)
+            self.move_group.set_joint_value_target(predicted_joints)
+            pose = self.move_group.get_current_pose(end_effector_link="gripper_end_tool_link").pose
             
-            if fk is None:
-                rospy.logwarn("Forward kinematics failed")
-                return current_ee_pose['position']
-                
             return np.array([
-                fk.pose.position.x,
-                fk.pose.position.y,
-                fk.pose.position.z
+                pose.position.x,
+                pose.position.y,
+                pose.position.z
             ])
             
         except Exception as e:
@@ -187,7 +197,7 @@ class URMPC:
         self.move_group.set_joint_value_target(joint_positions)
         
         # Get the pose
-        current_pose = self.move_group.get_current_pose().pose
+        current_pose = self.move_group.get_current_pose(end_effector_link = "gripper_end_tool_link").pose
         
         return {
             'position': np.array([
@@ -240,6 +250,28 @@ class URMPC:
         transformed_state['position'][:2] = arm_base_pos
         
         return transformed_state
+
+    def _get_jacobian(self, joint_positions: np.ndarray) -> np.ndarray:
+        """Get the Jacobian matrix for the current configuration"""
+        try:
+            # Ensure joint_positions is a list (not numpy array)
+            if isinstance(joint_positions, np.ndarray):
+                joint_positions = joint_positions.tolist()
+            
+            # Get Jacobian directly using joint positions
+            J = self.move_group.get_jacobian_matrix(joint_positions)
+            
+            # Convert to numpy array and ensure correct shape (6x6)
+            J = np.array(J)
+            if J.shape != (6, 6):
+                rospy.logwarn(f"Unexpected Jacobian shape: {J.shape}, using fallback")
+                return np.eye(6)
+                
+            return J
+            
+        except Exception as e:
+            rospy.logerr(f"Failed to get Jacobian: {str(e)}")
+            return np.eye(6)
 
 def main():
     """Test the MPC controller"""

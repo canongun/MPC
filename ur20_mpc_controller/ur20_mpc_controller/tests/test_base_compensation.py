@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import actionlib
 import moveit_commander
 from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryGoal
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from trajectory_msgs.msg import JointTrajectoryPoint
 from ur20_mpc_controller.models.ur_mpc import URMPC
 
 def test_base_compensation():
@@ -15,7 +15,7 @@ def test_base_compensation():
     
     # Initialize MoveIt
     moveit_commander.roscpp_initialize([])
-    robot = moveit_commander.RobotCommander()
+    # robot = moveit_commander.RobotCommander()
     move_group = moveit_commander.MoveGroupCommander("arm")
     
     # Get current joint positions instead of zeros
@@ -37,7 +37,7 @@ def test_base_compensation():
     rate = rospy.Rate(10)  # 10 Hz
     
     # Get initial end-effector pose
-    initial_pose = move_group.get_current_pose().pose
+    initial_pose = move_group.get_current_pose(end_effector_link = "gripper_end_tool_link").pose
     current_ee_pose = {
         'position': np.array([
             initial_pose.position.x,
@@ -53,10 +53,13 @@ def test_base_compensation():
     ee_positions = []
     joint_velocities = []
     
+    # Initialize joint velocities command
+    joint_velocities_cmd = np.zeros(6)  # Initial zero velocities
+    
     # Initial states
     current_joint_state = {
         'position': current_joint_positions,
-        'velocity': np.zeros(6)
+        'velocity': joint_velocities_cmd  # Use initialized velocities
     }
     
     times = np.arange(0, 10.0, 0.1)
@@ -65,11 +68,23 @@ def test_base_compensation():
         if rospy.is_shutdown():
             break
             
-        # Simulate base motion (circular path)
-        base_x = 0.5 * np.cos(2 * np.pi * 0.2 * t)
-        base_y = 0.5 * np.sin(2 * np.pi * 0.2 * t)
-        base_vx = -2 * np.pi * 0.2 * 0.5 * np.sin(2 * np.pi * 0.2 * t)
-        base_vy = 2 * np.pi * 0.2 * 0.5 * np.cos(2 * np.pi * 0.2 * t)
+        # # Simulate base motion (circular path)
+        # base_x = 0.5 * np.cos(2 * np.pi * 0.2 * t)
+        # base_y = 0.5 * np.sin(2 * np.pi * 0.2 * t)
+        # base_vx = -2 * np.pi * 0.2 * 0.5 * np.sin(2 * np.pi * 0.2 * t)
+        # base_vy = 2 * np.pi * 0.2 * 0.5 * np.cos(2 * np.pi * 0.2 * t)
+
+        # Simulate base motion (back and forth in X direction)
+        amplitude = 0.3  # meters
+        frequency = 0.2  # Hz
+        
+        # Position: Simple sinusoidal motion in X
+        base_x = amplitude * np.sin(2 * np.pi * frequency * t)
+        base_y = 0.0  # No Y motion
+        
+        # Velocity: Derivative of position
+        base_vx = amplitude * 2 * np.pi * frequency * np.cos(2 * np.pi * frequency * t)
+        base_vy = 0.0  # No Y velocity
         
         base_state = {
             'position': np.array([base_x, base_y, 0.0]),
@@ -79,10 +94,8 @@ def test_base_compensation():
         }
         
         # Update current joint state
-        current_joint_state = {
-            'position': current_joint_positions,
-            'velocity': np.zeros(6)  # Use actual velocities if available
-        }
+        current_joint_state['position'] = current_joint_positions
+        current_joint_state['velocity'] = joint_velocities_cmd
         
         # Compute control
         joint_velocities_cmd = controller.compute_control(
@@ -108,12 +121,18 @@ def test_base_compensation():
         
         # Add current and next positions
         current_point = JointTrajectoryPoint()
-        current_point.positions = current_joint_positions.tolist()
+        if isinstance(current_joint_positions, np.ndarray):
+            current_point.positions = current_joint_positions.tolist()
+        else:
+            current_point.positions = current_joint_positions  # already a list
         current_point.velocities = [0.0] * 6
         current_point.time_from_start = rospy.Duration(0.0)
         
         next_point = JointTrajectoryPoint()
-        next_point.positions = next_joint_positions.tolist()
+        if isinstance(next_joint_positions, np.ndarray):
+            next_point.positions = next_joint_positions.tolist()
+        else:
+            next_point.positions = next_joint_positions  # already a list
         next_point.velocities = joint_velocities_cmd.tolist()
         next_point.time_from_start = rospy.Duration(0.1)
         
@@ -141,6 +160,19 @@ def test_base_compensation():
         rospy.loginfo("------------------------")
         
         rate.sleep()
+
+        # Update current end-effector pose
+        current_pose = move_group.get_current_pose(end_effector_link="gripper_end_tool_link").pose
+        current_ee_pose['position'] = np.array([
+            current_pose.position.x,
+            current_pose.position.y,
+            current_pose.position.z
+        ])
+
+        # Update current joint state
+        current_joint_positions = move_group.get_current_joint_values()
+        current_joint_state['position'] = current_joint_positions
+        current_joint_state['velocity'] = joint_velocities_cmd
 
     # Convert to numpy arrays for plotting
     base_positions = np.array(base_positions)
