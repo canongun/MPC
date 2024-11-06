@@ -38,7 +38,14 @@ class URMPC:
         ])
         
         # Add joint velocity limits
-        self.joint_vel_limits = [-2.0, 2.0]  # rad/s
+        self.joint_vel_limits = {
+            'shoulder_pan_joint': 2.094395102393195,
+            'shoulder_lift_joint': 2.094395102393195,
+            'elbow_joint': 2.617993877991494,
+            'wrist_1_joint': 3.665191429188092,
+            'wrist_2_joint': 3.665191429188092,
+            'wrist_3_joint': 3.665191429188092
+        }
         
         # Adjust joint-specific scaling factors to prefer certain joints
         self.joint_scales = np.array([1.0, 0.8, 0.6, 0.4, 0.3, 0.2])  # Prefer base joints
@@ -47,16 +54,19 @@ class URMPC:
         
         # Add transformation between mobile base and arm base
         self.arm_base_offset = {
-            'x': 0.06,
-            'y': 0.1,
+            'x': 0.06,    # meters
+            'y': 0.1,     # meters
+            'z': 0.09,    # meters
+            'roll': 0.0,  # radians
+            'pitch': 0.0, # radians
             'yaw': np.pi  # 180 degrees in radians
         }
         
     def compute_control(self, 
-                       current_joint_state: Dict,
-                       current_ee_pose: Dict,
-                       target_ee_pose: Dict,
-                       base_state: Dict) -> np.ndarray:
+                    current_joint_state: Dict,
+                    current_ee_pose: Dict,
+                    target_ee_pose: Dict,
+                    base_state: Dict) -> np.ndarray:
         """Compute optimal joint velocities using MPC"""
         # Transform base motion to arm base frame
         transformed_base_state = self._transform_base_motion(base_state)
@@ -65,19 +75,21 @@ class URMPC:
         x0 = np.zeros(12)
         x0[:6] = current_joint_state['position']
         
-        # Set initial velocities based on transformed base motion
-        base_vel = transformed_base_state['linear_velocity']
-        base_vel_magnitude = np.linalg.norm(base_vel)
+        # Get base velocity in arm frame
+        base_vel = transformed_base_state['linear_velocity'][:3]  # Only take first 3 components
         
-        if base_vel_magnitude > 0.01:
-            # Get Jacobian for current configuration (compute once)
-            J = self._get_jacobian(current_joint_state['position'])
-            try:
-                # Initial velocity guess using Jacobian
-                x0[6:] = np.linalg.pinv(J) @ (-base_vel)
-            except:
-                # Fallback to scaled velocities if Jacobian inverse fails
-                x0[6:] = self.joint_scales * base_vel_magnitude
+        # Get Jacobian for current configuration
+        J = self._get_jacobian(current_joint_state['position'])
+        J_pos = J[:3, :]  # Take only position part of Jacobian
+        
+        try:
+            # Compute initial velocities using pseudoinverse
+            x0[6:] = -np.linalg.pinv(J_pos) @ base_vel
+        except Exception as e:
+            rospy.logwarn(f"Failed to compute initial guess using Jacobian: {str(e)}")
+            # Fallback to scaled velocities
+            base_vel_magnitude = np.linalg.norm(base_vel)
+            x0[6:] = self.joint_scales * base_vel_magnitude
         
         try:
             result = minimize(
@@ -109,92 +121,32 @@ class URMPC:
             rospy.logerr(f"Optimization error: {str(e)}")
             return x0[6:]
         
-    def _cost_function(self, 
-                      x: np.ndarray, 
-                      current_joint_state: Dict,
-                      current_ee_pose: Dict,
-                      target_ee_pose: Dict,
+    def _cost_function(self, x: np.ndarray, current_joint_state: Dict,
+                      current_ee_pose: Dict, target_ee_pose: Dict,
                       base_state: Dict) -> float:
-        """Compute cost with improved position and orientation preservation"""
-        joint_positions = x[:6]
+        """Cost function focusing on active compensation directions"""
         joint_velocities = x[6:]
         
-        try:
-            # Get Jacobian for current configuration
-            J = self._get_jacobian(joint_positions)
-            
-            # Split Jacobian into position and orientation parts
-            J_pos = J[:3, :]  # First 3 rows (position)
-            J_ori = J[3:, :]  # Last 3 rows (orientation)
-            
-            # Calculate end-effector velocities
-            ee_pos_vel = J_pos @ joint_velocities
-            ee_ori_vel = J_ori @ joint_velocities
-            
-            # Get base velocity
-            base_vel = base_state['linear_velocity']
-            
-            # Cost terms with improved weights
-            x_compensation_error = (ee_pos_vel[0] + base_vel[0])**2 * 15.0  # Increased weight for X compensation
-            y_motion_penalty = ee_pos_vel[1]**2 * 20.0    # Increased penalty for Y motion
-            z_motion_penalty = ee_pos_vel[2]**2 * 20.0    # Increased penalty for Z motion
-            orientation_cost = np.sum(ee_ori_vel**2) * 10.0
-            
-            # Position maintenance in Y and Z
-            current_pos = current_ee_pose['position']
-            target_pos = target_ee_pose['position']
-            yz_position_error = (
-                ((current_pos[1] - target_pos[1])**2 + 
-                 (current_pos[2] - target_pos[2])**2) * 15.0
-            )
-            
-            # Joint position and velocity regularization
-            joint_regularization = np.sum((joint_positions - current_joint_state['position'])**2) * 2.0
-            velocity_smoothness = np.sum(joint_velocities**2) * 0.1
-            
-            cost = (
-                x_compensation_error +   # Primary X-direction compensation
-                y_motion_penalty +       # Strict Y-motion prevention
-                z_motion_penalty +       # Strict Z-motion prevention
-                orientation_cost +       # Orientation preservation
-                yz_position_error +      # Y,Z position maintenance
-                joint_regularization +   # Joint position maintenance
-                velocity_smoothness      # Smooth motion
-            )
-            
-            return cost
-            
-        except Exception as e:
-            rospy.logwarn(f"Cost function error: {str(e)}")
-            return 1e6
+        # Get Jacobian
+        J = self._get_jacobian(current_joint_state['position'])
+        J_pos = J[:3, :]  # Position Jacobian
         
-    def _predict_ee_position(self, 
-                            joint_positions: np.ndarray, 
-                            joint_velocities: np.ndarray,
-                            current_ee_pose: Dict) -> np.ndarray:
-        """Predict end-effector position using MoveIt forward kinematics"""
-        try:
-            # Predict next joint positions
-            predicted_joints = joint_positions + joint_velocities * self.dt
-            
-            # Check joint limits
-            for i, pos in enumerate(predicted_joints):
-                if pos < self.joint_pos_limits[i][0] or pos > self.joint_pos_limits[i][1]:
-                    return current_ee_pose['position']
-            
-            # Use MoveIt to compute forward kinematics
-            self.move_group.set_joint_value_target(predicted_joints)
-            pose = self.move_group.get_current_pose(end_effector_link="gripper_end_tool_link").pose
-            
-            return np.array([
-                pose.position.x,
-                pose.position.y,
-                pose.position.z
-            ])
-            
-        except Exception as e:
-            rospy.logwarn(f"Forward kinematics error: {str(e)}")
-            return current_ee_pose['position']
+        # End-effector velocity
+        ee_vel = J_pos @ joint_velocities
+        base_vel = base_state['linear_velocity'][:3]
+        compensation_error = ee_vel + base_vel
+        
+        # Detect active motion directions
+        active_dirs = np.abs(base_vel) > 0.01
+        
+        # Weight compensation error more heavily in active directions
+        dir_weights = np.where(active_dirs, 10.0, 1.0)
+        position_cost = np.sum((dir_weights * compensation_error)**2)
+        
+        # Add regularization terms
+        damping_cost = np.sum(joint_velocities**2) * 0.1
+        
+        return position_cost + damping_cost
         
     def _get_bounds(self, x0: np.ndarray) -> List[Tuple[float, float]]:
         """Get bounds for optimization variables"""
@@ -232,7 +184,7 @@ class URMPC:
         }
 
     def _get_constraints(self, x0: np.ndarray, current_ee_pose: Dict, base_state: Dict) -> List[Dict]:
-        """Add stricter constraints for Y,Z stability and orientation preservation"""
+        """Update constraints for better compensation in all directions"""
         constraints = []
         
         # Velocity constraints
@@ -241,23 +193,26 @@ class URMPC:
             'fun': lambda x: self.joint_vel_limits[1] - np.abs(x[6:])
         })
         
-        # Add Y,Z position and orientation constraints
         def ee_motion_constraint(x):
             J = self._get_jacobian(x[:6])
             ee_vel = J @ x[6:]
             
-            # Split into position and orientation velocities
+            # Split velocities
             pos_vel = ee_vel[:3]
             ori_vel = ee_vel[3:]
             
-            # Stricter limits for Y,Z motion
-            pos_constraint = 0.005 - np.abs(pos_vel[1:3])  # Reduced from 0.01 to 0.005
-            ori_constraint = 0.005 - np.abs(ori_vel)       # Reduced from 0.01 to 0.005
+            # Compensation constraint: ee_vel + base_vel should be near zero
+            compensation_error = pos_vel + base_state['linear_velocity'][:3]
             
-            # Add X-direction compensation constraint
-            x_compensation = np.abs(pos_vel[0] + base_state['linear_velocity'][0]) - 0.01
+            # Tighter bounds on compensation error in primary motion direction
+            motion_mask = np.abs(base_state['linear_velocity'][:3]) > 0.01
+            bounds = np.where(motion_mask, 0.005, 0.02)  # Tighter bounds in motion direction
             
-            return np.concatenate([pos_constraint, ori_constraint, [x_compensation]])
+            # Combine constraints
+            return np.concatenate([
+                bounds - np.abs(compensation_error),  # Position compensation
+                0.01 - np.abs(ori_vel)               # Orientation stability
+            ])
         
         constraints.append({
             'type': 'ineq',
@@ -268,27 +223,28 @@ class URMPC:
 
     def _transform_base_motion(self, base_state: Dict) -> Dict:
         """Transform base motion from mobile base frame to arm base frame"""
-        # Get base motion in mobile base frame
-        base_vel = base_state['linear_velocity'][:2]
-        base_pos = base_state['position'][:2]
+        base_vel = base_state['linear_velocity']
+        base_pos = base_state['position']
         
-        # Rotation matrix for 180 degree rotation
+        # Create full rotation matrix with proper handling of orientation
+        yaw = self.arm_base_offset['yaw']
         R = np.array([
-            [-1, 0],
-            [0, -1]
+            [np.cos(yaw), -np.sin(yaw), 0],
+            [np.sin(yaw), np.cos(yaw), 0],
+            [0, 0, 1]
         ])
         
-        # Transform velocities to arm base frame
+        # Transform velocities and positions
         arm_base_vel = R @ base_vel
+        arm_base_pos = R @ base_pos + np.array([
+            self.arm_base_offset['x'],
+            self.arm_base_offset['y'],
+            self.arm_base_offset['z']  # Include Z offset
+        ])
         
-        # Transform position to arm base frame
-        arm_base_pos = R @ base_pos + np.array([self.arm_base_offset['x'], 
-                                              self.arm_base_offset['y']])
-        
-        # Create transformed base state
         transformed_state = base_state.copy()
-        transformed_state['linear_velocity'][:2] = arm_base_vel
-        transformed_state['position'][:2] = arm_base_pos
+        transformed_state['linear_velocity'] = arm_base_vel
+        transformed_state['position'] = arm_base_pos
         
         return transformed_state
 

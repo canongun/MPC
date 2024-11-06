@@ -68,12 +68,6 @@ def test_base_compensation():
         if rospy.is_shutdown():
             break
             
-        # # Simulate base motion (circular path)
-        # base_x = 0.5 * np.cos(2 * np.pi * 0.2 * t)
-        # base_y = 0.5 * np.sin(2 * np.pi * 0.2 * t)
-        # base_vx = -2 * np.pi * 0.2 * 0.5 * np.sin(2 * np.pi * 0.2 * t)
-        # base_vy = 2 * np.pi * 0.2 * 0.5 * np.cos(2 * np.pi * 0.2 * t)
-
         # Simulate base motion (back and forth in X direction)
         amplitude = 0.3  # meters
         frequency = 0.2  # Hz
@@ -81,15 +75,17 @@ def test_base_compensation():
         # Position: Simple sinusoidal motion in X
         base_x = amplitude * np.sin(2 * np.pi * frequency * t)
         base_y = 0.0  # No Y motion
+        base_z = 0.0  # No Z motion
         
         # Velocity: Derivative of position
         base_vx = amplitude * 2 * np.pi * frequency * np.cos(2 * np.pi * frequency * t)
         base_vy = 0.0  # No Y velocity
+        base_vz = 0.0  # No Z velocity
         
         base_state = {
-            'position': np.array([base_x, base_y, 0.0]),
+            'position': np.array([base_x, base_y, base_z]),
             'orientation': np.zeros(3),
-            'linear_velocity': np.array([base_vx, base_vy, 0.0]),
+            'linear_velocity': np.array([base_vx, base_vy, base_vz]),
             'angular_velocity': np.zeros(3)
         }
         
