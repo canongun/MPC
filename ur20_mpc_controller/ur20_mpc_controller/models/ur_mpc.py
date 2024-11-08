@@ -20,9 +20,9 @@ class URMPC:
         self.dt = 0.1      # Time step (seconds)
         
         # Adjust weights for better stability
-        self.w_ee_pos = 5.0     # Increase position tracking weight
-        self.w_ee_ori = 0.5     # Keep orientation weight low
-        self.w_control = 0.1    # Reduce control effort penalty for more aggressive correction
+        self.w_ee_pos = 5.0     # Position tracking weight
+        self.w_ee_ori = 2.0     # Increase orientation weight
+        self.w_control = 0.1    # Control effort penalty
         
         # Reduce velocity limits for smoother motion
         self.joint_vel_limits = [-1.5, 1.5]  # rad/s (reduced from ±2.0)
@@ -75,20 +75,23 @@ class URMPC:
         x0 = np.zeros(12)
         x0[:6] = current_joint_state['position']
         
-        # Get base velocity in arm frame
-        base_vel = transformed_base_state['linear_velocity'][:3]  # Only take first 3 components
-        
-        # Get Jacobian for current configuration
+        # Get full Jacobian
         J = self._get_jacobian(current_joint_state['position'])
-        J_pos = J[:3, :]  # Take only position part of Jacobian
+        J_pos = J[:3, :]
+        J_ori = J[3:, :]
+        
+        # Get base velocities in arm frame
+        base_lin_vel = transformed_base_state['linear_velocity'][:3]
+        base_ang_vel = transformed_base_state['angular_velocity']
         
         try:
-            # Compute initial velocities using pseudoinverse
-            x0[6:] = -np.linalg.pinv(J_pos) @ base_vel
+            # Compute initial velocities using pseudoinverse for both position and orientation
+            J_full = np.vstack([J_pos, J_ori])
+            base_vel_full = np.concatenate([base_lin_vel, base_ang_vel])
+            x0[6:] = -np.linalg.pinv(J_full) @ base_vel_full
         except Exception as e:
             rospy.logwarn(f"Failed to compute initial guess using Jacobian: {str(e)}")
-            # Fallback to scaled velocities
-            base_vel_magnitude = np.linalg.norm(base_vel)
+            base_vel_magnitude = np.linalg.norm(np.concatenate([base_lin_vel, base_ang_vel]))
             x0[6:] = self.joint_scales * base_vel_magnitude
         
         try:
@@ -127,26 +130,37 @@ class URMPC:
         """Cost function focusing on active compensation directions"""
         joint_velocities = x[6:]
         
-        # Get Jacobian
+        # Get full Jacobian (including orientation)
         J = self._get_jacobian(current_joint_state['position'])
         J_pos = J[:3, :]  # Position Jacobian
+        J_ori = J[3:, :]  # Orientation Jacobian
         
-        # End-effector velocity
-        ee_vel = J_pos @ joint_velocities
-        base_vel = base_state['linear_velocity'][:3]
-        compensation_error = ee_vel + base_vel
+        # End-effector velocities (both linear and angular)
+        ee_lin_vel = J_pos @ joint_velocities
+        ee_ang_vel = J_ori @ joint_velocities
+        
+        # Base velocities
+        base_lin_vel = base_state['linear_velocity'][:3]
+        base_ang_vel = base_state['angular_velocity']
+        
+        # Compensation errors
+        pos_compensation_error = ee_lin_vel + base_lin_vel
+        ori_compensation_error = ee_ang_vel + base_ang_vel
         
         # Detect active motion directions
-        active_dirs = np.abs(base_vel) > 0.01
+        active_lin_dirs = np.abs(base_lin_vel) > 0.01
+        active_ang_dirs = np.abs(base_ang_vel) > 0.01
         
-        # Weight compensation error more heavily in active directions
-        dir_weights = np.where(active_dirs, 10.0, 1.0)
-        position_cost = np.sum((dir_weights * compensation_error)**2)
+        # Weight compensation errors
+        lin_weights = np.where(active_lin_dirs, 10.0, 1.0)
+        ang_weights = np.where(active_ang_dirs, 5.0, 0.5)  # Lower weights for orientation
         
-        # Add regularization terms
+        # Compute costs
+        position_cost = np.sum((lin_weights * pos_compensation_error)**2)
+        orientation_cost = np.sum((ang_weights * ori_compensation_error)**2)
         damping_cost = np.sum(joint_velocities**2) * 0.1
         
-        return position_cost + damping_cost
+        return position_cost + self.w_ee_ori * orientation_cost + damping_cost
         
     def _get_bounds(self, x0: np.ndarray) -> List[Tuple[float, float]]:
         """Get bounds for optimization variables"""
@@ -197,21 +211,22 @@ class URMPC:
             J = self._get_jacobian(x[:6])
             ee_vel = J @ x[6:]
             
-            # Split velocities
             pos_vel = ee_vel[:3]
             ori_vel = ee_vel[3:]
             
-            # Compensation constraint: ee_vel + base_vel should be near zero
-            compensation_error = pos_vel + base_state['linear_velocity'][:3]
+            base_lin_vel = base_state['linear_velocity'][:3]
+            base_ang_vel = base_state['angular_velocity']
             
-            # Tighter bounds on compensation error in primary motion direction
-            motion_mask = np.abs(base_state['linear_velocity'][:3]) > 0.01
-            bounds = np.where(motion_mask, 0.005, 0.02)  # Tighter bounds in motion direction
+            pos_error = pos_vel + base_lin_vel
+            ori_error = ori_vel + base_ang_vel
             
-            # Combine constraints
+            # Stricter bounds for orientation
+            pos_bounds = 0.01 * np.ones(3)  # 1cm position error
+            ori_bounds = 0.005 * np.ones(3)  # ~0.3 degrees orientation error
+            
             return np.concatenate([
-                bounds - np.abs(compensation_error),  # Position compensation
-                0.01 - np.abs(ori_vel)               # Orientation stability
+                pos_bounds - np.abs(pos_error),
+                ori_bounds - np.abs(ori_error)
             ])
         
         constraints.append({
@@ -225,8 +240,9 @@ class URMPC:
         """Transform base motion from mobile base frame to arm base frame"""
         base_vel = base_state['linear_velocity']
         base_pos = base_state['position']
+        base_ang_vel = base_state['angular_velocity']
         
-        # Create full rotation matrix with proper handling of orientation
+        # Create full rotation matrix
         yaw = self.arm_base_offset['yaw']
         R = np.array([
             [np.cos(yaw), -np.sin(yaw), 0],
@@ -239,12 +255,16 @@ class URMPC:
         arm_base_pos = R @ base_pos + np.array([
             self.arm_base_offset['x'],
             self.arm_base_offset['y'],
-            self.arm_base_offset['z']  # Include Z offset
+            self.arm_base_offset['z']
         ])
+        
+        # Transform angular velocities
+        arm_base_ang_vel = R @ base_ang_vel
         
         transformed_state = base_state.copy()
         transformed_state['linear_velocity'] = arm_base_vel
         transformed_state['position'] = arm_base_pos
+        transformed_state['angular_velocity'] = arm_base_ang_vel
         
         return transformed_state
 

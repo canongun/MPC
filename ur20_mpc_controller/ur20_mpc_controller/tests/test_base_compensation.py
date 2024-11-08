@@ -8,6 +8,7 @@ import moveit_commander
 from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryGoal
 from trajectory_msgs.msg import JointTrajectoryPoint
 from ur20_mpc_controller.models.ur_mpc import URMPC
+from tf.transformations import euler_from_quaternion
 
 def test_base_compensation():
     """Test the MPC controller with base motion compensation"""
@@ -37,14 +38,19 @@ def test_base_compensation():
     rate = rospy.Rate(10)  # 10 Hz
     
     # Get initial end-effector pose
-    initial_pose = move_group.get_current_pose(end_effector_link = "gripper_end_tool_link").pose
+    initial_pose = move_group.get_current_pose(end_effector_link="gripper_end_tool_link").pose
     current_ee_pose = {
         'position': np.array([
             initial_pose.position.x,
             initial_pose.position.y,
             initial_pose.position.z
         ]),
-        'orientation': np.zeros(3)
+        'orientation': np.array(euler_from_quaternion([
+            initial_pose.orientation.x,
+            initial_pose.orientation.y,
+            initial_pose.orientation.z,
+            initial_pose.orientation.w
+        ]))
     }
     target_ee_pose = current_ee_pose.copy()  # Try to maintain initial pose
     
@@ -52,6 +58,7 @@ def test_base_compensation():
     base_positions = []
     ee_positions = []
     joint_velocities = []
+    ee_orientations = []
     
     # Initialize joint velocities command
     joint_velocities_cmd = np.zeros(6)  # Initial zero velocities
@@ -68,25 +75,39 @@ def test_base_compensation():
         if rospy.is_shutdown():
             break
             
-        # Simulate base motion (back and forth in X direction)
-        amplitude = 0.3  # meters
-        frequency = 0.2  # Hz
+        # Simulate base motion (back and forth in Y direction)
+        amplitude = 0.2  # meters (keep the same to maintain ±0.3m motion range)
+        frequency = 0.1  # Hz (slow motion)
         
-        # Position: Simple sinusoidal motion in X
-        base_x = amplitude * np.sin(2 * np.pi * frequency * t)
-        base_y = 0.0  # No Y motion
+        # Position: Simple sinusoidal motion in Y
+        base_x = 0.0  # No X motion
+        base_y = amplitude * np.sin(2 * np.pi * frequency * t)  # Y motion
         base_z = 0.0  # No Z motion
         
         # Velocity: Derivative of position
-        base_vx = amplitude * 2 * np.pi * frequency * np.cos(2 * np.pi * frequency * t)
-        base_vy = 0.0  # No Y velocity
+        base_vx = 0.0  # No X velocity
+        base_vy = amplitude * 2 * np.pi * frequency * np.cos(2 * np.pi * frequency * t)  # Y velocity
         base_vz = 0.0  # No Z velocity
+        
+        # Add angular motion simulation
+        base_roll = 0.1 * np.sin(2 * np.pi * 0.1 * t)  # Small roll oscillation
+        base_pitch = 0.05 * np.sin(2 * np.pi * 0.15 * t)  # Small pitch oscillation
+        base_yaw = 0.15 * np.sin(2 * np.pi * 0.05 * t)  # Larger yaw oscillation
+        
+        # Angular velocities
+        # base_roll_vel = 0.1 * 2 * np.pi * 0.1 * np.cos(2 * np.pi * 0.1 * t)
+        # base_pitch_vel = 0.05 * 2 * np.pi * 0.15 * np.cos(2 * np.pi * 0.15 * t)
+        # base_yaw_vel = 0.15 * 2 * np.pi * 0.05 * np.cos(2 * np.pi * 0.05 * t)
+
+        base_roll_vel = 0
+        base_pitch_vel = 0
+        base_yaw_vel = 0
         
         base_state = {
             'position': np.array([base_x, base_y, base_z]),
-            'orientation': np.zeros(3),
+            'orientation': np.array([base_roll, base_pitch, base_yaw]),
             'linear_velocity': np.array([base_vx, base_vy, base_vz]),
-            'angular_velocity': np.zeros(3)
+            'angular_velocity': np.array([base_roll_vel, base_pitch_vel, base_yaw_vel])
         }
         
         # Update current joint state
@@ -141,6 +162,7 @@ def test_base_compensation():
         base_positions.append(base_state['position'])
         ee_positions.append(current_ee_pose['position'])
         joint_velocities.append(joint_velocities_cmd)
+        ee_orientations.append(current_ee_pose['orientation'])
         
         # Update current joint positions
         current_joint_positions = next_joint_positions
@@ -164,6 +186,12 @@ def test_base_compensation():
             current_pose.position.y,
             current_pose.position.z
         ])
+        current_ee_pose['orientation'] = np.array(euler_from_quaternion([
+            current_pose.orientation.x,
+            current_pose.orientation.y,
+            current_pose.orientation.z,
+            current_pose.orientation.w
+        ]))
 
         # Update current joint state
         current_joint_positions = move_group.get_current_joint_values()
@@ -174,6 +202,7 @@ def test_base_compensation():
     base_positions = np.array(base_positions)
     ee_positions = np.array(ee_positions)
     joint_velocities = np.array(joint_velocities)
+    ee_orientations = np.array(ee_orientations)
 
     # Plot results
     plt.figure(figsize=(12, 8))
@@ -196,6 +225,17 @@ def test_base_compensation():
     plt.ylabel('Velocity [rad/s]')
     plt.legend()
     plt.title('Joint Velocities')
+    plt.grid(True)
+    
+    # Orientation plot
+    plt.subplot(313)
+    for i in range(3):
+        plt.plot(times, ee_orientations[:, i], 
+                 label=['Roll', 'Pitch', 'Yaw'][i])
+    plt.xlabel('Time [s]')
+    plt.ylabel('Angle [rad]')
+    plt.legend()
+    plt.title('End-effector Orientation')
     plt.grid(True)
     
     plt.tight_layout()
