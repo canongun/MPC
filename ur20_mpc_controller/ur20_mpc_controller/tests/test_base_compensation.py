@@ -77,32 +77,32 @@ def test_base_compensation():
             
         # Simulate base motion (back and forth in Y direction)
         amplitude = 0.2  # meters (keep the same to maintain ±0.3m motion range)
+        # amplitude_yaw = 1.047  # 60 degrees in radians
         frequency = 0.1  # Hz (slow motion)
         
         # Position: Simple sinusoidal motion in Y
-        base_x = 0.0  # No X motion
-        base_y = amplitude * np.sin(2 * np.pi * frequency * t)  # Y motion
-        base_z = 0.0  # No Z motion
+        base_x = amplitude * np.sin(2 * np.pi * frequency * t)  # X motion
+        # base_y = amplitude * np.sin(2 * np.pi * frequency * t)  # Y motion
+        base_y = 0.0
+        base_z = 0.0  # Z motion
         
         # Velocity: Derivative of position
-        base_vx = 0.0  # No X velocity
-        base_vy = amplitude * 2 * np.pi * frequency * np.cos(2 * np.pi * frequency * t)  # Y velocity
-        base_vz = 0.0  # No Z velocity
+        base_vx = amplitude * 2 * np.pi * frequency * np.cos(2 * np.pi * frequency * t)  # X velocity
+        # base_vy = amplitude * 2 * np.pi * frequency * np.cos(2 * np.pi * frequency * t)  # Y velocity
+        base_vy = 0.0
+        base_vz = 0.0  # Z velocity
         
-        # Add angular motion simulation
-        base_roll = 0.1 * np.sin(2 * np.pi * 0.1 * t)  # Small roll oscillation
-        base_pitch = 0.05 * np.sin(2 * np.pi * 0.15 * t)  # Small pitch oscillation
-        base_yaw = 0.15 * np.sin(2 * np.pi * 0.05 * t)  # Larger yaw oscillation
+        # Add angular motion simulation (only yaw)
+        base_roll = 0.0  # No roll
+        base_pitch = 0.0  # No pitch
+        # base_yaw = amplitude_yaw * np.sin(2 * np.pi * frequency * t)  # Yaw oscillation ±60 degrees
+        base_yaw = 0.0
         
         # Angular velocities
-        # base_roll_vel = 0.1 * 2 * np.pi * 0.1 * np.cos(2 * np.pi * 0.1 * t)
-        # base_pitch_vel = 0.05 * 2 * np.pi * 0.15 * np.cos(2 * np.pi * 0.15 * t)
-        # base_yaw_vel = 0.15 * 2 * np.pi * 0.05 * np.cos(2 * np.pi * 0.05 * t)
-
-        base_roll_vel = 0
-        base_pitch_vel = 0
-        base_yaw_vel = 0
-        
+        base_roll_vel = 0.0
+        base_pitch_vel = 0.0
+        # base_yaw_vel = amplitude_yaw * 2 * np.pi * frequency * np.cos(2 * np.pi * frequency * t)
+        base_yaw_vel = 0.0
         base_state = {
             'position': np.array([base_x, base_y, base_z]),
             'orientation': np.array([base_roll, base_pitch, base_yaw]),
