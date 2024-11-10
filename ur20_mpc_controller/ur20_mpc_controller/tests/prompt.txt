@@ -1,0 +1,137 @@
+
+# UR20 MPC Controller Project Log
+
+## Project Overview
+We are developing a Model Predictive Controller (MPC) for a UR20 robotic arm mounted on a mobile base. The primary goal is to stabilize both the end-effector position and orientation while the mobile base is in motion.
+## System Architecture
+```mermaid
+graph TD
+    A[Base Observer] --> C[MPC Controller]
+    B[UR20 Interface] --> C
+    C --> D[Joint Trajectory Action Server]
+    E[Base Motion Estimator] --> C
+```
+## Key Components Implemented
+### 1. MPC Controller (`ur_mpc.py`)
+- Implements Model Predictive Control for joint velocity computation
+- Cost function considers:
+  - End-effector position stability
+  - End-effector orientation stability
+  - Base motion compensation (both linear and angular)
+  - Joint motion smoothness
+  - Proximal joint minimization
+- Uses full geometric Jacobian for:
+  - Position control (J_pos)
+  - Orientation control (J_ori)
+- Implements adaptive weighting for active motion directions
+### 2. Base Observer (`base_observer.py`)
+- Subscribes to `/mobile_base/odom`
+- Processes odometry data for base motion
+- Provides real-time base state information including orientation
+### 3. Base Motion Estimator (`base_estimator.py`)
+- Maintains history of base motions
+- Implements velocity smoothing
+- Provides base motion predictions for both linear and angular motion
+### 4. Test Scripts
+- `test_base_compensation.py`: 
+  - Simulates combined linear and angular base motion
+  - Implements real-time orientation tracking
+  - Provides visualization for position and orientation stability
+### 5. Action Server/Client Interface
+- `mpc_action_server.py`:
+  - Implements ROS action server for MPC control
+  - Integrates base observer with MPC controller
+  - Handles trajectory execution via FollowJointTrajectoryAction
+- `mpc_action_client.py`:
+  - Provides interface to start/stop compensation
+  - Receives real-time feedback on EE pose and joint velocities
+## Current Implementation Status
+### Completed
+1. Basic MPC framework
+2. Joint-specific velocity scaling
+3. Base motion compensation (position and orientation)
+4. Integration with UR20 action server interface
+5. Forward kinematics implementation
+6. Orientation compensation implementation
+7. Real-time orientation tracking and visualization
+8. Action server/client architecture implementation
+9. Base motion simulation for testing
+### In Progress
+1. Fine-tuning orientation compensation weights
+2. Testing with different base motion patterns
+### To Do
+1. Implement adaptive weighting for orientation control
+2. Add orientation-specific constraints
+3. Performance evaluation with combined motion patterns
+## Current Configuration
+```python
+# MPC Parameters
+horizon = 10  # Prediction horizon
+dt = 0.1      # Time step (seconds)
+w_ee_pos = 10.0    # End-effector position weight
+w_ee_ori = 5.0     # Orientation weight
+w_control = 0.1    # Control effort weight
+joint_vel_limits = [-2.0, 2.0]  # Joint velocity limits
+
+# Orientation Control Parameters
+ori_bounds = 0.005  # Radians (~0.3 degrees)
+pos_bounds = 0.01   # Meters (1cm)
+
+# Motion Detection Thresholds
+lin_threshold = 0.01  # m/s
+ang_threshold = 0.01  # rad/s
+```
+## Latest Changes
+- Added full orientation compensation in MPC
+- Implemented orientation tracking and visualization
+- Updated cost function to include orientation terms
+- Added orientation-specific constraints
+- Modified base motion simulation to include angular motion
+- Implemented adaptive weighting for active motion directions
+## Next Steps
+1. Test orientation compensation with real robot
+2. Implement adaptive orientation weights
+3. Add orientation prediction to base estimator
+4. Optimize computational performance
+## Repository Structure
+```
+catkin_ws/src/MPC/ur20_mpc_controller/
+├── CMakeLists.txt
+├── package.xml
+├── setup.py
+├── ur20_mpc_controller/
+│   ├── __init__.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── ur_mpc.py
+│   │   ├── base_estimator.py
+│   │   └── base_observer.py
+│   ├── actions/
+│   │   ├── nodes/
+│   │   │   ├── server/
+│   │   │   │   └── mpc_action_server.py
+│   │   │   └── client/
+│   │   │       └── mpc_action_client.py
+│   └── tests/
+│       ├── __init__.py
+│       ├── test_base_compensation.py
+│       └── test_base_observer.py
+```
+## Current Issues
+- Need to fine-tune orientation weights for better performance
+- Testing needed with combined linear and angular base motion
+- Computational optimization for real-time performance
+- Orientation compensation needs validation with real hardware
+- Action server needs testing with different motion patterns
+- Integration testing needed between simulated base motion and MPC compensation
+## Testing Architecture
+### Base Motion Simulation
+- `test_base_observer.py` simulates mobile base motion
+- Publishes to `/mobile_base/odom` topic
+- Configurable motion patterns (linear/angular)
+
+### Control Testing
+1. Start base motion simulation
+2. Launch MPC action server
+3. Start MPC action client
+4. Monitor compensation performance via feedback
