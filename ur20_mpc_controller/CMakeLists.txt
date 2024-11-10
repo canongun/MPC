@@ -8,12 +8,12 @@ project(ur20_mpc_controller)
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
+  actionlib_msgs
   rospy
   std_msgs
   geometry_msgs
   trajectory_msgs
   control_msgs
-  actionlib
 )
 
 ## System dependencies are found with CMake's conventions
@@ -64,17 +64,17 @@ catkin_python_setup()
 # )
 
 ## Generate actions in the 'action' folder
-# add_action_files(
-#   FILES
-#   Action1.action
-#   Action2.action
-# )
+add_action_files(
+  FILES
+  MPC.action
+)
 
 ## Generate added messages and services with any dependencies listed here
-# generate_messages(
-#   DEPENDENCIES
-#   std_msgs  # Or other packages containing msgs
-# )
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+  actionlib_msgs
+)
 
 ################################################
 ## Declare ROS dynamic reconfigure parameters ##
@@ -108,7 +108,7 @@ catkin_python_setup()
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES ur20_mpc_controller
-#  CATKIN_DEPENDS rospy
+ CATKIN_DEPENDS actionlib_msgs rospy
 #  DEPENDS system_lib
 )
 
