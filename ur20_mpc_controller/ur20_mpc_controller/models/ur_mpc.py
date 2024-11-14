@@ -13,7 +13,7 @@ class URMPC:
         # Initialize MoveIt
         moveit_commander.roscpp_initialize([])
         self.robot = moveit_commander.RobotCommander()
-        self.move_group = moveit_commander.MoveGroupCommander("arm")  # Your group name
+        self.move_group = moveit_commander.MoveGroupCommander("arm")
         
         # MPC parameters
         self.horizon = 10  # Prediction horizon
@@ -23,9 +23,6 @@ class URMPC:
         self.w_ee_pos = 5.0     # Position tracking weight
         self.w_ee_ori = 2.0     # Increase orientation weight
         self.w_control = 0.1    # Control effort penalty
-        
-        # Reduce velocity limits for smoother motion
-        self.joint_vel_limits = [-1.5, 1.5]  # rad/s (reduced from ±2.0)
         
         # State and control limits
         self.joint_pos_limits = np.array([  # [min, max] for each joint
@@ -80,15 +77,15 @@ class URMPC:
         J_pos = J[:3, :]
         J_ori = J[3:, :]
         
-        # Get base velocities in arm frame
-        base_lin_vel = transformed_base_state['linear_velocity'][:3]
-        base_ang_vel = transformed_base_state['angular_velocity']
+        # Get base velocities in arm frame (invert linear velocity)
+        base_lin_vel = -transformed_base_state['linear_velocity'][:3]
+        base_ang_vel = -transformed_base_state['angular_velocity']
         
         try:
             # Compute initial velocities using pseudoinverse for both position and orientation
             J_full = np.vstack([J_pos, J_ori])
             base_vel_full = np.concatenate([base_lin_vel, base_ang_vel])
-            x0[6:] = -np.linalg.pinv(J_full) @ base_vel_full
+            x0[6:] = np.linalg.pinv(J_full) @ base_vel_full
         except Exception as e:
             rospy.logwarn(f"Failed to compute initial guess using Jacobian: {str(e)}")
             base_vel_magnitude = np.linalg.norm(np.concatenate([base_lin_vel, base_ang_vel]))
@@ -139,13 +136,13 @@ class URMPC:
         ee_lin_vel = J_pos @ joint_velocities
         ee_ang_vel = J_ori @ joint_velocities
         
-        # Base velocities
-        base_lin_vel = base_state['linear_velocity'][:3]
-        base_ang_vel = base_state['angular_velocity']
+        # Base velocities (invert both linear and angular velocities)
+        base_lin_vel = -base_state['linear_velocity'][:3]    # Negative for position compensation
+        base_ang_vel = -base_state['angular_velocity']       # Negative for orientation compensation
         
         # Compensation errors
-        pos_compensation_error = ee_lin_vel + base_lin_vel
-        ori_compensation_error = ee_ang_vel + base_ang_vel
+        pos_compensation_error = ee_lin_vel - base_lin_vel
+        ori_compensation_error = ee_ang_vel - base_ang_vel
         
         # Detect active motion directions
         active_lin_dirs = np.abs(base_lin_vel) > 0.01
@@ -153,7 +150,7 @@ class URMPC:
         
         # Weight compensation errors
         lin_weights = np.where(active_lin_dirs, 10.0, 1.0)
-        ang_weights = np.where(active_ang_dirs, 5.0, 0.5)  # Lower weights for orientation
+        ang_weights = np.where(active_ang_dirs, 5.0, 2.5)
         
         # Compute costs
         position_cost = np.sum((lin_weights * pos_compensation_error)**2)
@@ -214,8 +211,9 @@ class URMPC:
             pos_vel = ee_vel[:3]
             ori_vel = ee_vel[3:]
             
-            base_lin_vel = base_state['linear_velocity'][:3]
-            base_ang_vel = base_state['angular_velocity']
+            # Invert both linear and angular velocities for proper compensation
+            base_lin_vel = -base_state['linear_velocity'][:3]    # Negative for position compensation
+            base_ang_vel = -base_state['angular_velocity']       # Negative for orientation compensation
             
             pos_error = pos_vel + base_lin_vel
             ori_error = ori_vel + base_ang_vel
@@ -245,8 +243,8 @@ class URMPC:
         # Create full rotation matrix
         yaw = self.arm_base_offset['yaw']
         R = np.array([
-            [np.cos(yaw), -np.sin(yaw), 0],
-            [np.sin(yaw), np.cos(yaw), 0],
+            [-np.cos(yaw), np.sin(yaw), 0],  # Negative x-axis
+            [-np.sin(yaw), -np.cos(yaw), 0],
             [0, 0, 1]
         ])
         
