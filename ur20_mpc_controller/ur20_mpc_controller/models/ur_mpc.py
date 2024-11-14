@@ -10,19 +10,45 @@ from ur20_mpc_controller.models.base_estimator import BaseMotionEstimator
 
 class URMPC:
     def __init__(self):
-        # Initialize MoveIt
+        # Initialize ROS node
         moveit_commander.roscpp_initialize([])
         self.robot = moveit_commander.RobotCommander()
         self.move_group = moveit_commander.MoveGroupCommander("arm")
         
-        # MPC parameters
-        self.horizon = 10  # Prediction horizon
-        self.dt = 0.1      # Time step (seconds)
+        # Load parameters from config
+        self.horizon = rospy.get_param('~mpc_controller/horizon', 15)
+        self.dt = rospy.get_param('~mpc_controller/dt', 0.05)
         
-        # Adjust weights for better stability
-        self.w_ee_pos = 5.0     # Position tracking weight
-        self.w_ee_ori = 2.0     # Increase orientation weight
-        self.w_control = 0.1    # Control effort penalty
+        # Load weights
+        self.w_ee_pos = rospy.get_param('~mpc_controller/weights/position', 10.0)
+        self.w_ee_ori = rospy.get_param('~mpc_controller/weights/orientation', 2.0)
+        self.w_control = rospy.get_param('~mpc_controller/weights/control', 0.05)
+        
+        # Load thresholds
+        self.lin_threshold = rospy.get_param('~mpc_controller/thresholds/linear', 0.005)
+        self.ang_threshold = rospy.get_param('~mpc_controller/thresholds/angular', 0.005)
+        
+        # Load active weights
+        self.lin_weight_active = rospy.get_param('~mpc_controller/active_weights/linear', 15.0)
+        self.lin_weight_idle = rospy.get_param('~mpc_controller/active_weights/linear_idle', 1.0)
+        self.ang_weight_active = rospy.get_param('~mpc_controller/active_weights/angular', 5.0)
+        self.ang_weight_idle = rospy.get_param('~mpc_controller/active_weights/angular_idle', 0.5)
+        
+        # Load bounds
+        self.pos_bound = rospy.get_param('~mpc_controller/bounds/position', 0.005)
+        self.ori_bound = rospy.get_param('~mpc_controller/bounds/orientation', 0.005)
+        
+        # Load joint scales
+        self.joint_scales = np.array(rospy.get_param('~mpc_controller/joint_scales', 
+            [1.0, 0.7, 0.5, 0.3, 0.2, 0.1]))
+        
+        # Load robot configuration
+        self.arm_base_offset = {
+            'x': rospy.get_param('~mpc_controller/arm_base_offset/x', 0.06),
+            'y': rospy.get_param('~mpc_controller/arm_base_offset/y', -0.1),
+            'z': rospy.get_param('~mpc_controller/arm_base_offset/z', 0.09),
+            'yaw': rospy.get_param('~mpc_controller/arm_base_offset/yaw', np.pi)
+        }
         
         # State and control limits
         self.joint_pos_limits = np.array([  # [min, max] for each joint
@@ -44,20 +70,7 @@ class URMPC:
             'wrist_3_joint': 3.665191429188092
         }
         
-        # Adjust joint-specific scaling factors to prefer certain joints
-        self.joint_scales = np.array([1.0, 0.8, 0.6, 0.4, 0.3, 0.2])  # Prefer base joints
-        
         self.base_estimator = BaseMotionEstimator()
-        
-        # Add transformation between mobile base and arm base
-        self.arm_base_offset = {
-            'x': 0.06,    # meters
-            'y': -0.1,     # meters
-            'z': 0.09,    # meters
-            'roll': 0.0,  # radians
-            'pitch': 0.0, # radians
-            'yaw': np.pi  # 180 degrees in radians
-        }
         
     def compute_control(self, 
                     current_joint_state: Dict,
@@ -145,12 +158,12 @@ class URMPC:
         ori_compensation_error = ee_ang_vel - base_ang_vel
         
         # Detect active motion directions
-        active_lin_dirs = np.abs(base_lin_vel) > 0.01
-        active_ang_dirs = np.abs(base_ang_vel) > 0.01
+        active_lin_dirs = np.abs(base_lin_vel) > 0.005
+        active_ang_dirs = np.abs(base_ang_vel) > 0.005
         
         # Weight compensation errors
-        lin_weights = np.where(active_lin_dirs, 10.0, 1.0)
-        ang_weights = np.where(active_ang_dirs, 5.0, 2.5)
+        lin_weights = np.where(active_lin_dirs, 15.0, 1.0)
+        ang_weights = np.where(active_ang_dirs, 5.0, 0.5)
         
         # Compute costs
         position_cost = np.sum((lin_weights * pos_compensation_error)**2)
@@ -219,7 +232,7 @@ class URMPC:
             ori_error = ori_vel + base_ang_vel
             
             # Stricter bounds for orientation
-            pos_bounds = 0.01 * np.ones(3)  # 1cm position error
+            pos_bounds = 0.005 * np.ones(3)  # 5mm position error
             ori_bounds = 0.005 * np.ones(3)  # ~0.3 degrees orientation error
             
             return np.concatenate([
