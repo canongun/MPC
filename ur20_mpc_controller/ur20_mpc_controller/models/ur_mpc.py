@@ -242,8 +242,8 @@ class URMPC:
         
         # Get offset vector from rotation center to arm base
         offset = np.array([
-            self.arm_base_offset['x'],   # +0.06m in x
-            self.arm_base_offset['y'],   # -0.1m in y
+            self.arm_base_offset['x'],
+            self.arm_base_offset['y'],
             self.arm_base_offset['z']
         ])
         
@@ -259,7 +259,7 @@ class URMPC:
             0.0
         ])
         
-        # Platform linear velocity compensation (working correctly)
+        # Platform linear velocity compensation
         platform_comp_vel = platform_vel
         
         # Total velocity combines both compensations
