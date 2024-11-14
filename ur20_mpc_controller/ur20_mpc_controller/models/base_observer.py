@@ -5,10 +5,15 @@ import numpy as np
 from nav_msgs.msg import Odometry
 from tf.transformations import euler_from_quaternion
 
+SIM = True
+
 class BaseObserver:
     def __init__(self):
         # Initialize subscriber
-        self.odom_sub = rospy.Subscriber('/mobile_base/odom', Odometry, self.odom_callback)
+        if SIM:
+            self.odom_sub = rospy.Subscriber('/mobile_base/odom', Odometry, self.odom_callback)
+        else:
+            self.odom_sub = rospy.Subscriber('/odometry/filtered', Odometry, self.odom_callback)
         
         # State variables
         self.base_position = np.zeros(3)     # [x, y, z]

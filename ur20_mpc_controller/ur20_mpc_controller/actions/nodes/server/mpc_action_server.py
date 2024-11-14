@@ -11,6 +11,8 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 import moveit_commander
 from tf.transformations import euler_from_quaternion
 
+SIM = True
+
 class MPCActionServer:
     def __init__(self):
         # Initialize the action server
@@ -28,10 +30,17 @@ class MPCActionServer:
         self.base_observer = BaseObserver()
         
         # Initialize trajectory action client
-        self.trajectory_client = actionlib.SimpleActionClient(
-            '/arm/scaled_pos_traj_controller/follow_joint_trajectory',
-            FollowJointTrajectoryAction
-        )
+        if SIM:
+            self.trajectory_client = actionlib.SimpleActionClient(
+                '/arm/scaled_pos_traj_controller/follow_joint_trajectory',
+                FollowJointTrajectoryAction
+            )
+        else:
+            self.trajectory_client = actionlib.SimpleActionClient(
+                '/scaled_pos_joint_traj_controller/follow_joint_trajectory',
+                FollowJointTrajectoryAction
+            )
+            
         rospy.loginfo("Waiting for trajectory action server...")
         self.trajectory_client.wait_for_server()
         rospy.loginfo("Trajectory action server connected!")
