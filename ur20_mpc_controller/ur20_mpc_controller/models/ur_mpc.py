@@ -52,7 +52,7 @@ class URMPC:
         # Add transformation between mobile base and arm base
         self.arm_base_offset = {
             'x': 0.06,    # meters
-            'y': 0.1,     # meters
+            'y': -0.1,     # meters
             'z': 0.09,    # meters
             'roll': 0.0,  # radians
             'pitch': 0.0, # radians
@@ -236,33 +236,47 @@ class URMPC:
 
     def _transform_base_motion(self, base_state: Dict) -> Dict:
         """Transform base motion from mobile base frame to arm base frame"""
-        base_vel = base_state['linear_velocity']
-        base_pos = base_state['position']
-        base_ang_vel = base_state['angular_velocity']
+        # Get platform velocities
+        platform_vel = base_state['linear_velocity']
+        platform_ang_vel = base_state['angular_velocity']
         
-        # Create full rotation matrix
-        yaw = self.arm_base_offset['yaw']
-        R = np.array([
-            [-np.cos(yaw), np.sin(yaw), 0],  # Negative x-axis
-            [-np.sin(yaw), -np.cos(yaw), 0],
-            [0, 0, 1]
-        ])
-        
-        # Transform velocities and positions
-        arm_base_vel = R @ base_vel
-        arm_base_pos = R @ base_pos + np.array([
-            self.arm_base_offset['x'],
-            self.arm_base_offset['y'],
+        # Get offset vector from rotation center to arm base
+        offset = np.array([
+            self.arm_base_offset['x'],   # +0.06m in x
+            self.arm_base_offset['y'],   # -0.1m in y
             self.arm_base_offset['z']
         ])
         
-        # Transform angular velocities
-        arm_base_ang_vel = R @ base_ang_vel
+        # For rotation around z-axis
+        omega = platform_ang_vel[2]  # positive is counter-clockwise
+        
+        # Calculate tangential velocity for counter-rotation
+        # When platform rotates clockwise (negative omega):
+        # We need to move the end-effector in the opposite direction in world frame
+        tangential_vel = -np.array([
+            omega * offset[1],     # Changed sign: -ω * y
+            -omega * offset[0],    # Changed sign: ω * x
+            0.0
+        ])
+        
+        # Platform linear velocity compensation (working correctly)
+        platform_comp_vel = platform_vel
+        
+        # Total velocity combines both compensations
+        total_vel = platform_comp_vel + tangential_vel
+        
+        # Debug information
+        rospy.loginfo("=== Motion Transform Debug ===")
+        rospy.loginfo(f"Platform angular velocity: {platform_ang_vel}")
+        rospy.loginfo(f"Offset from rotation center: {offset}")
+        rospy.loginfo(f"Calculated tangential velocity: {tangential_vel}")
+        rospy.loginfo(f"Total compensation velocity: {total_vel}")
+        rospy.loginfo("============================")
         
         transformed_state = base_state.copy()
-        transformed_state['linear_velocity'] = arm_base_vel
-        transformed_state['position'] = arm_base_pos
-        transformed_state['angular_velocity'] = arm_base_ang_vel
+        transformed_state['linear_velocity'] = total_vel
+        transformed_state['position'] = base_state['position'] + offset
+        transformed_state['angular_velocity'] = platform_ang_vel  # Keep for orientation compensation
         
         return transformed_state
 
