@@ -1,0 +1,100 @@
+
+# UR20 MPC Controller Project Log
+
+## System Overview
+- **Hardware Setup**:
+  - UR20 Robot Arm mounted on a mobile platform
+  - Arm base link offset from platform rotation center: [0.06m in +x, -0.1m in -y]
+  - Platform uses differential drive (can rotate around its center)
+- **Coordinate Frames**:
+  1. World Frame: Fixed reference frame
+  2. Platform Frame: Center of mobile platform rotation
+  3. Arm Base Frame: Robot arm's base_link
+  4. End-effector Frame: Robot's end-effector
+## Control Objective
+1. **Primary Goal**: Stabilize end-effector pose in world frame while platform moves
+   - Maintain absolute position when platform translates
+   - Maintain absolute position when platform rotates
+   - Maintain absolute orientation during all platform motion
+2. **Current Status**:
+   - Translation compensation works correctly
+   - Orientation compensation works correctly
+   - Position compensation during rotation needs fixing
+## Controller Implementation (ur_mpc.py)
+1. **MPC Controller Structure**:
+   ```python
+   class URMPC:
+       def __init__(self):
+           # MPC parameters
+           self.horizon = 10
+           self.dt = 0.1
+           
+           # Weights
+           self.w_ee_pos = 5.0
+           self.w_ee_ori = 2.0
+           self.w_control = 0.1
+           
+           # Arm base offset from platform center
+           self.arm_base_offset = {
+               'x': 0.06,    # meters
+               'y': -0.1,    # meters
+               'z': 0.09,    # meters
+               'yaw': np.pi  # radians
+           }
+   ```
+
+2. **Motion Transformation**:
+   - Handles conversion between platform and arm base frames
+   - Calculates compensation velocities for:
+     * Platform linear motion
+     * Platform angular motion
+     * End-effector orientation
+3. **Control Pipeline**:
+   ```
+   Base Motion → Transform → MPC Optimization → Joint Velocities → Robot Execution
+   ```
+
+## Current Challenge
+1. **Rotational Compensation Issue**:
+   - When platform rotates clockwise:
+     * End-effector should maintain position in world frame
+     * Currently moves in -x direction in world frame
+     * Need to correct tangential velocity calculation
+2. **Platform Motion Convention**:
+   - Platform forward is -x direction
+   - Clockwise rotation gives negative angular velocity
+   - Arm base follows circular arc during platform rotation
+3. **Attempted Solutions**:
+   ```python
+   # Latest attempt at tangential velocity calculation
+   tangential_vel = -np.array([
+       -omega * offset[1],    # -ω * y (note: y is negative)
+       omega * offset[0],     # ω * x
+       0.0
+   ])
+   ```
+
+## Implementation Details
+1. **Base Observer** (base_observer.py):
+   - Subscribes to platform odometry
+   - Provides platform state (position, orientation, velocities)
+2. **Action Server/Client Architecture**:
+   - Server executes MPC control loop
+   - Client initiates and monitors compensation
+3. **MoveIt Integration**:
+   - Used for forward kinematics
+   - Provides Jacobian matrices
+   - Handles joint trajectory execution
+## Testing Results
+1. **Translation Test**:
+   - Platform moves in -x: End-effector compensates correctly
+   - Platform moves in y: End-effector compensates correctly
+2. **Rotation Test**:
+   - Platform rotates clockwise: End-effector moves in -x (incorrect)
+   - Orientation compensation works
+   - Position compensation needs fixing
+## Next Steps
+1. Need to verify geometric calculations for rotational compensation
+2. Consider alternative approaches to tangential velocity calculation
+3. Validate transformation chain between all coordinate frames
+This controller uses Model Predictive Control to generate joint velocities that maintain the end-effector's absolute pose in world frame during platform motion. The current challenge is specifically with position compensation during platform rotation, while translation and orientation compensation are working correctly.
