@@ -73,16 +73,16 @@ class URMPC:
         self.base_estimator = BaseMotionEstimator()
         
     def compute_control(self, 
-                    current_joint_state: Dict,
-                    current_ee_pose: Dict,
-                    target_ee_pose: Dict,
-                    base_state: Dict) -> np.ndarray:
+                current_joint_state: Dict,
+                current_ee_pose: Dict,
+                target_ee_pose: Dict,
+                base_state: Dict) -> np.ndarray:
         """Compute optimal joint velocities using MPC"""
         # Transform base motion to arm base frame
         transformed_base_state = self._transform_base_motion(base_state)
         
-        # Initial guess
-        x0 = np.zeros(12)
+        # Initial guess - Modified for horizon
+        x0 = np.zeros(12 * self.horizon)  # Changed from 12 to 12 * horizon
         x0[:6] = current_joint_state['position']
         
         # Get full Jacobian
@@ -98,11 +98,20 @@ class URMPC:
             # Compute initial velocities using pseudoinverse for both position and orientation
             J_full = np.vstack([J_pos, J_ori])
             base_vel_full = np.concatenate([base_lin_vel, base_ang_vel])
-            x0[6:] = np.linalg.pinv(J_full) @ base_vel_full
+            initial_velocities = np.linalg.pinv(J_full) @ base_vel_full
+            
+            # Set initial velocities for all horizon steps
+            for i in range(self.horizon):
+                x0[6+i*12:12+i*12] = initial_velocities  # Added this loop
+                
         except Exception as e:
             rospy.logwarn(f"Failed to compute initial guess using Jacobian: {str(e)}")
             base_vel_magnitude = np.linalg.norm(np.concatenate([base_lin_vel, base_ang_vel]))
-            x0[6:] = self.joint_scales * base_vel_magnitude
+            initial_velocities = self.joint_scales * base_vel_magnitude
+            
+            # Set initial velocities for all horizon steps
+            for i in range(self.horizon):
+                x0[6+i*12:12+i*12] = initial_velocities  # Added this loop
         
         try:
             result = minimize(
@@ -126,32 +135,57 @@ class URMPC:
             
             if not result.success:
                 rospy.logwarn(f"MPC optimization failed: {result.message}")
-                return x0[6:]
+                return x0[6:12]  # Return first timestep velocities
                 
-            return result.x[6:]
+            return result.x[6:12]  # Return first timestep velocities
             
         except Exception as e:
             rospy.logerr(f"Optimization error: {str(e)}")
-            return x0[6:]
+            return x0[6:12]  # Return first timestep velocities
+
+    def _cost_function(self, x, current_joint_state, current_ee_pose, target_ee_pose, base_state):
+        # Keep the current timestep calculation exactly as is
+        current_cost = self._compute_current_cost(
+            x[6:12],  # Current joint velocities
+            current_joint_state,
+            base_state
+        )
         
-    def _cost_function(self, x: np.ndarray, current_joint_state: Dict,
-                      current_ee_pose: Dict, target_ee_pose: Dict,
-                      base_state: Dict) -> float:
-        """Cost function focusing on active compensation directions"""
-        joint_velocities = x[6:]
-        
+        # Add future cost terms if horizon > 1
+        future_cost = 0.0
+        if self.horizon > 1:
+            try:
+                # Only add future predictions if they exist
+                for i in range(1, self.horizon):
+                    future_velocities = x[6+i*12:12+i*12]
+                    # Use a decreasing weight for future terms
+                    weight = 0.8**i  # Exponential decay of importance
+                    future_cost += weight * self._compute_current_cost(
+                        future_velocities,
+                        current_joint_state,  # Use current state as reference
+                        base_state  # Use current base state (conservative)
+                    )
+            except Exception as e:
+                rospy.logwarn(f"Future cost computation failed: {e}")
+                # If future computation fails, fall back to current cost only
+                return current_cost
+                
+        return current_cost + 0.5 * future_cost  # Weight future less than present
+
+    def _compute_current_cost(self, joint_velocities, joint_state, base_state):
+        """Existing cost computation - exactly as before"""
         # Get full Jacobian (including orientation)
-        J = self._get_jacobian(current_joint_state['position'])
-        J_pos = J[:3, :]  # Position Jacobian
-        J_ori = J[3:, :]  # Orientation Jacobian
+        J = self._get_jacobian(joint_state['position'])
+        J_pos = J[:3, :]
+        J_ori = J[3:, :]
         
         # End-effector velocities (both linear and angular)
         ee_lin_vel = J_pos @ joint_velocities
         ee_ang_vel = J_ori @ joint_velocities
         
         # Base velocities (invert both linear and angular velocities)
-        base_lin_vel = -base_state['linear_velocity'][:3]    # Negative for position compensation
-        base_ang_vel = -base_state['angular_velocity']       # Negative for orientation compensation
+        base_lin_vel = -base_state['linear_velocity'][:3]    
+        base_ang_vel = -base_state['angular_velocity']       
         
         # Compensation errors
         pos_compensation_error = ee_lin_vel - base_lin_vel
@@ -171,18 +205,22 @@ class URMPC:
         damping_cost = np.sum(joint_velocities**2) * 0.1
         
         return position_cost + self.w_ee_ori * orientation_cost + damping_cost
+
         
     def _get_bounds(self, x0: np.ndarray) -> List[Tuple[float, float]]:
         """Get bounds for optimization variables"""
         bounds = []
-        # Position bounds
-        for i in range(6):
-            bounds.append((self.joint_pos_limits[i][0], 
-                         self.joint_pos_limits[i][1]))
-        # Velocity bounds
-        for i in range(6):
-            bounds.append((self.joint_vel_limits[0], 
-                         self.joint_vel_limits[1]))
+        
+        # For each timestep in horizon
+        for i in range(self.horizon):
+            # Position bounds for current timestep
+            for j in range(6):
+                bounds.append((self.joint_pos_limits[j][0], 
+                            self.joint_pos_limits[j][1]))
+            # Velocity bounds for current timestep
+            for j in range(6):
+                bounds.append((self.joint_vel_limits[0], 
+                            self.joint_vel_limits[1]))
         return bounds
     
     def _get_current_ee_pose(self, joint_positions: np.ndarray) -> Dict:
@@ -211,15 +249,20 @@ class URMPC:
         """Update constraints for better compensation in all directions"""
         constraints = []
         
-        # Velocity constraints
-        constraints.append({
-            'type': 'ineq',
-            'fun': lambda x: self.joint_vel_limits[1] - np.abs(x[6:])
-        })
+        # Velocity constraints for all timesteps in horizon
+        for i in range(self.horizon):
+            idx_start = 6 + i*12  # Start index for velocities at timestep i
+            idx_end = 12 + i*12   # End index for velocities at timestep i
+            constraints.append({
+                'type': 'ineq',
+                'fun': lambda x, idx_s=idx_start, idx_e=idx_end: 
+                    self.joint_vel_limits[1] - np.abs(x[idx_s:idx_e])
+            })
         
         def ee_motion_constraint(x):
+            # For first timestep only (most critical)
             J = self._get_jacobian(x[:6])
-            ee_vel = J @ x[6:]
+            ee_vel = J @ x[6:12]  # Use first timestep velocities
             
             pos_vel = ee_vel[:3]
             ori_vel = ee_vel[3:]
@@ -240,6 +283,7 @@ class URMPC:
                 ori_bounds - np.abs(ori_error)
             ])
         
+        # Add EE motion constraint
         constraints.append({
             'type': 'ineq',
             'fun': ee_motion_constraint
@@ -265,7 +309,7 @@ class URMPC:
         
         # Calculate tangential velocity for counter-rotation
         # When platform rotates clockwise (negative omega):
-        # We need to move the end-effector in the opposite direction in world frame
+        # The end-effector should move in the opposite direction in world frame
         tangential_vel = -np.array([
             omega * offset[1],     # Changed sign: -ω * y
             -omega * offset[0],    # Changed sign: ω * x
