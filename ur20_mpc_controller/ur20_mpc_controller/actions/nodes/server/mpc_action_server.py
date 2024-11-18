@@ -11,8 +11,6 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 import moveit_commander
 from tf.transformations import euler_from_quaternion
 
-SIM = True
-
 class MPCActionServer:
     def __init__(self):
         # Initialize the action server
@@ -22,6 +20,9 @@ class MPCActionServer:
             execute_cb=self.execute_cb,
             auto_start=False
         )
+
+        # Load parameters from config
+        self.sim = rospy.get_param('~mpc_controller/sim', False)
         
         # Initialize MoveIt and controllers
         moveit_commander.roscpp_initialize([])
@@ -30,7 +31,7 @@ class MPCActionServer:
         self.base_observer = BaseObserver()
         
         # Initialize trajectory action client
-        if SIM:
+        if self.sim:
             self.trajectory_client = actionlib.SimpleActionClient(
                 '/arm/scaled_pos_traj_controller/follow_joint_trajectory',
                 FollowJointTrajectoryAction
@@ -50,7 +51,7 @@ class MPCActionServer:
         rospy.loginfo("MPC Action Server is ready")
         
     def execute_cb(self, goal):
-        rate = rospy.Rate(10)  # 10 Hz
+        rate = rospy.Rate(1.0/self.mpc.dt)  # Use configured dt
         
         # Get initial poses and joint positions
         initial_pose = self.move_group.get_current_pose(
@@ -94,7 +95,7 @@ class MPCActionServer:
             )
             
             # Predict next joint positions
-            next_joint_positions = current_joint_positions + control * 0.1
+            next_joint_positions = current_joint_positions + control * self.mpc.dt
             
             # Create and send trajectory
             goal = FollowJointTrajectoryGoal()
@@ -116,7 +117,7 @@ class MPCActionServer:
             next_point = JointTrajectoryPoint()
             next_point.positions = next_joint_positions.tolist()
             next_point.velocities = control.tolist()
-            next_point.time_from_start = rospy.Duration(0.1)
+            next_point.time_from_start = rospy.Duration(self.mpc.dt)
             
             goal.trajectory.points = [current_point, next_point]
             
