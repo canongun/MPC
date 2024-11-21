@@ -1,22 +1,22 @@
 mpc_controller:
   # Simulation Mode
-  sim: True
+  sim: False
 
   # MPC Parameters
-  horizon: 5
+  horizon: 3
   dt: 0.05
   
   # Cost Function Weights
   weights:
-    position: 8.0
-    orientation: 4.0
-    control: 0.02
-    damping: 0.5
+    position: 3.0
+    orientation: 2.0
+    control: 0.005
+    smooth: 0.02
   
   # Active Motion Weights
   active_weights:
-    linear: 15.0
-    angular: 8.0
+    linear: 50.0
+    angular: 5.0
   
   # Robot Configuration
   arm_base_offset:
