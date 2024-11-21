@@ -17,36 +17,26 @@ class URMPC:
         self.move_group = moveit_commander.MoveGroupCommander("arm")
         
         # Initialize dynamics model
-        self.dynamics = UR20Dynamics()
+        self.dynamics: UR20Dynamics = UR20Dynamics()
         
         # Load parameters from config
-        self.horizon = rospy.get_param('~mpc_controller/horizon', 15)
-        self.dt = rospy.get_param('~mpc_controller/dt', 0.05)
+        self.horizon: int = rospy.get_param('~mpc_controller/horizon', 15)
+        self.dt: float = rospy.get_param('~mpc_controller/dt', 0.05)
+        
+        # Add parameter validation
+        if self.horizon <= 0:
+            raise ValueError("Horizon must be positive")
+        if self.dt <= 0:
+            raise ValueError("Time step must be positive")
         
         # Load weights
-        self.w_ee_pos = rospy.get_param('~mpc_controller/weights/position', 10.0)
-        self.w_ee_ori = rospy.get_param('~mpc_controller/weights/orientation', 2.0)
-        self.w_control = rospy.get_param('~mpc_controller/weights/control', 0.05)
-        self.w_smooth = rospy.get_param('~mpc_controller/weights/smooth', 0.3)
-        self.w_damp = rospy.get_param('~mpc_controller/weights/damp', 0.4)
-        
-        # Load thresholds
-        self.lin_threshold = rospy.get_param('~mpc_controller/thresholds/linear', 0.005)
-        self.ang_threshold = rospy.get_param('~mpc_controller/thresholds/angular', 0.005)
+        self.w_ee_pos = rospy.get_param('~mpc_controller/weights/position', 8.0)
+        self.w_ee_ori = rospy.get_param('~mpc_controller/weights/orientation', 4.0)
+        self.w_control = rospy.get_param('~mpc_controller/weights/control', 0.02)
         
         # Load active weights
         self.lin_weight_active = rospy.get_param('~mpc_controller/active_weights/linear', 15.0)
-        self.lin_weight_idle = rospy.get_param('~mpc_controller/active_weights/linear_idle', 1.0)
         self.ang_weight_active = rospy.get_param('~mpc_controller/active_weights/angular', 5.0)
-        self.ang_weight_idle = rospy.get_param('~mpc_controller/active_weights/angular_idle', 0.5)
-        
-        # Load bounds
-        self.pos_bound = rospy.get_param('~mpc_controller/bounds/position', 0.005)
-        self.ori_bound = rospy.get_param('~mpc_controller/bounds/orientation', 0.005)
-        
-        # Load joint scales
-        self.joint_scales = np.array(rospy.get_param('~mpc_controller/joint_scales', 
-            [1.0, 0.7, 0.5, 0.3, 0.2, 0.1]))
         
         # Load robot configuration
         self.arm_base_offset = {
@@ -56,28 +46,11 @@ class URMPC:
             'yaw': rospy.get_param('~mpc_controller/arm_base_offset/yaw', np.pi)
         }
         
-        # State and control limits
-        self.joint_pos_limits = np.array([  # [min, max] for each joint
-            [-2*np.pi, 2*np.pi],  # Joint 1
-            [-2*np.pi, 2*np.pi],  # Joint 2
-            [-2*np.pi, 2*np.pi],  # Joint 3
-            [-2*np.pi, 2*np.pi],  # Joint 4
-            [-2*np.pi, 2*np.pi],  # Joint 5
-            [-2*np.pi, 2*np.pi]   # Joint 6
-        ])
-        
-        # Add joint velocity limits
-        self.joint_vel_limits = {
-            'shoulder_pan_joint': 2.094395102393195,
-            'shoulder_lift_joint': 2.094395102393195,
-            'elbow_joint': 2.617993877991494,
-            'wrist_1_joint': 3.665191429188092,
-            'wrist_2_joint': 3.665191429188092,
-            'wrist_3_joint': 3.665191429188092
-        }
-        
         self.base_estimator = BaseMotionEstimator()
         self.previous_solution = None
+        
+        # Add damping weight
+        self.w_damping = rospy.get_param('~mpc_controller/weights/damping', 0.5)
         
     def compute_control(self, 
                 current_joint_state: Dict,
@@ -88,6 +61,12 @@ class URMPC:
         
         # Transform base motion to arm base frame
         transformed_base_state = self._transform_base_motion(base_state)
+        
+        # Adjust target pose to account for base motion
+        adjusted_target_pose = {
+            'position': target_ee_pose['position'] - transformed_base_state['position'],
+            'orientation': target_ee_pose['orientation'] - transformed_base_state['orientation']
+        }
         
         # Get current state vector
         current_state = self.dynamics.get_state_vector(
@@ -113,10 +92,15 @@ class URMPC:
             for i in range(self.horizon):
                 x0[i*self.dynamics.n_controls:(i+1)*self.dynamics.n_controls] = initial_vel
         
+        # Add stability check
+        ee_error = np.linalg.norm(current_ee_pose['position'] - target_ee_pose['position'])
+        if ee_error > 0.01 and np.all(np.abs(base_state['linear_velocity']) < 0.01):
+            rospy.logwarn(f"End-effector deviating: {ee_error}m with no base motion")
+        
         # Optimize with reduced tolerance
         try:
             result = minimize(
-                fun=lambda x: self._cost_function(x, current_state, target_ee_pose, base_trajectory),
+                fun=lambda x: self._cost_function(x, current_state, adjusted_target_pose, base_trajectory),
                 x0=x0,
                 method='SLSQP',
                 bounds=self._get_bounds(x0),
@@ -142,14 +126,18 @@ class URMPC:
             # Calculate distance to target
             ee_error = np.linalg.norm(current_ee_pose['position'] - target_ee_pose['position'])
             
-            # Modified velocity scaling
+            # Modified velocity scaling for smoother motion
             max_scale = rospy.get_param('~mpc_controller/velocity/max_scale', 0.9)
-            min_scale = rospy.get_param('~mpc_controller/velocity/min_scale', 0.3)
+            min_scale = rospy.get_param('~mpc_controller/velocity/min_scale', 0.4)
             
-            # Less aggressive scaling
-            scale = min_scale + (max_scale - min_scale) * (1 - np.exp(-1.5 * ee_error))
+            # Smoother scaling function
+            scale = min_scale + (max_scale - min_scale) * (1 - np.exp(-1.0 * ee_error))
             
-            # Apply scaling
+            # Apply scaling with additional smoothing
+            if hasattr(self, 'prev_scale'):
+                scale = 0.7 * scale + 0.3 * self.prev_scale  # Smooth scale changes
+            self.prev_scale = scale
+            
             control = scale * control
             
             return control
@@ -157,97 +145,6 @@ class URMPC:
         except Exception as e:
             rospy.logerr(f"Optimization error: {str(e)}")
             return x0[:self.dynamics.n_controls]
-
-    def calculate_tracking_cost(self, 
-                          state: np.ndarray, 
-                          target_ee_pose: Dict, 
-                          base_state: Dict,
-                          k: int,
-                          control: np.ndarray) -> float:
-        """Calculate tracking cost with velocity compensation"""
-        # Get Jacobian at current joint positions
-        q = state[:self.dynamics.n_q]
-        J = self.dynamics.get_jacobian(q)
-        J_pos = J[:3, :]
-        J_ori = J[3:, :]
-        
-        # Calculate end-effector velocities
-        ee_lin_vel = J_pos @ control
-        ee_ang_vel = J_ori @ control
-        
-        # Get base velocities (negative for compensation)
-        base_lin_vel = -base_state['linear_velocity'][:3]
-        base_ang_vel = -base_state['angular_velocity']
-        
-        # Velocity compensation error
-        pos_vel_error = ee_lin_vel - base_lin_vel
-        ori_vel_error = ee_ang_vel - base_ang_vel
-        
-        # Position and orientation error
-        ee_pos = state[12:15]
-        ee_ori = state[15:18]
-        pos_error = ee_pos - (target_ee_pose['position'] + base_state['position'])
-        ori_error = ee_ori - (target_ee_pose['orientation'] + base_state['orientation'])
-        
-        # Combine costs with appropriate weights
-        pos_cost = (self.w_ee_pos * np.sum(pos_error**2) + 
-                    self.lin_weight_active * np.sum(pos_vel_error**2))
-        ori_cost = (self.w_ee_ori * np.sum(ori_error**2) + 
-                    self.ang_weight_active * np.sum(ori_vel_error**2))
-        
-        return pos_cost + ori_cost
-
-    # def calculate_terminal_cost(self, 
-    #                       final_state: np.ndarray, 
-    #                       target_ee_pose: Dict, 
-    #                       final_base_state: Dict) -> float:
-    #     """
-    #     Calculate terminal cost for final state
-    #     """
-    #     # Higher weights for terminal state
-    #     terminal_weight = 5.0
-    #     return terminal_weight * self.calculate_tracking_cost(
-    #         final_state, 
-    #         target_ee_pose, 
-    #         final_base_state, 
-    #         k=self.horizon
-    #     )
-
-    def _cost_function(self, x: np.ndarray, 
-                  current_state: np.ndarray,
-                  target_ee_pose: Dict,
-                  base_trajectory: List[Dict]) -> float:
-        """True MPC cost function with prediction"""
-        total_cost = 0.0
-        x_current = current_state.copy()  # Start from current state
-        
-        # Reshape control sequence
-        control_sequence = x.reshape(self.horizon, self.dynamics.n_controls)
-        
-        # Simulate forward over horizon
-        for k in range(self.horizon):
-            # Get control input for this step
-            u_k = control_sequence[k]
-            
-            # Get predicted base state at time k
-            base_k = base_trajectory[k]
-            
-            # Stage cost - tracking and control
-            stage_cost = self.calculate_stage_cost(x_current, target_ee_pose, base_k, u_k, k)
-            total_cost += stage_cost
-            
-            # Predict next state using dynamics
-            x_current = self.dynamics.predict_next_state(x_current, u_k)
-        
-        # Add terminal cost
-        terminal_cost = self.calculate_terminal_cost(
-            x_current, 
-            target_ee_pose, 
-            base_trajectory[-1]
-        )
-        total_cost += terminal_cost
-        
-        return total_cost
 
     def calculate_stage_cost(self, 
                         state: np.ndarray,
@@ -257,51 +154,73 @@ class URMPC:
                         k: int) -> float:
         """Calculate cost for a single stage in the prediction horizon"""
         # Get current end-effector state
-        ee_pos = state[12:15]
-        ee_ori = state[15:18]
+        ee_pos = state[2*self.dynamics.n_q:2*self.dynamics.n_q + 3]
+        ee_ori = state[2*self.dynamics.n_q + 3:2*self.dynamics.n_q + 6]
         
         # Get Jacobian for velocity computation
-        J = self.dynamics.get_jacobian(state[:self.n_q])
+        q = state[:self.dynamics.n_q]
+        J = self.dynamics.get_jacobian(q)
         J_pos = J[:3, :]
         J_ori = J[3:, :]
         
-        # Compute end-effector velocity
-        ee_vel = J_pos @ control
+        # Calculate end-effector velocities
+        ee_lin_vel = J_pos @ control
+        ee_ang_vel = J_ori @ control
         
-        # Predicted base motion compensation
-        base_vel = -base_state['linear_velocity'][:3]
+        # Get base velocities for compensation
+        base_lin_vel = -base_state['linear_velocity'][:3]
+        base_ang_vel = -base_state['angular_velocity']
         
-        # Velocity tracking error
-        vel_error = ee_vel - base_vel
+        # Velocity tracking errors
+        vel_error = ee_lin_vel - base_lin_vel
+        ori_vel_error = ee_ang_vel - base_ang_vel
         
-        # Position tracking error (considering base motion)
-        pos_error = ee_pos - (target_ee_pose['position'] + base_state['position'])
+        # Position and orientation errors
+        pos_error = ee_pos - target_ee_pose['position']
+        ori_error = ee_ori - target_ee_pose['orientation']
         
-        # Compute costs with time-varying weights
-        time_weight = 0.95**k  # Decrease weight for later predictions
+        # Add damping terms to reduce oscillations
+        damping_cost = self.w_damping * (np.sum(ee_lin_vel**2) + np.sum(ee_ang_vel**2))
         
-        # Stage costs
-        vel_cost = self.lin_weight_active * np.sum(vel_error**2)
-        pos_cost = self.w_ee_pos * np.sum(pos_error**2)
-        control_cost = self.w_control * np.sum(control**2)
+        # Time-varying weight (more aggressive at start, more damped later)
+        time_weight = 0.98**k  # Changed from 0.95 for smoother decay
         
-        return time_weight * (vel_cost + pos_cost + control_cost)
+        # Compute individual cost terms
+        pos_cost = (self.w_ee_pos * np.sum(pos_error**2) + 
+                    self.lin_weight_active * np.sum(vel_error**2))
+        
+        ori_cost = (self.w_ee_ori * np.sum(ori_error**2) + 
+                    self.ang_weight_active * np.sum(ori_vel_error**2))
+        
+        # Control cost with smoothness term
+        if k > 0 and hasattr(self, 'prev_control'):
+            control_smoothness = np.sum((control - self.prev_control)**2)
+            control_cost = (self.w_control * np.sum(control**2) + 
+                           0.1 * self.w_control * control_smoothness)
+        else:
+            control_cost = self.w_control * np.sum(control**2)
+        
+        self.prev_control = control.copy()
+        
+        return time_weight * (pos_cost + ori_cost + control_cost + damping_cost)
 
     def calculate_terminal_cost(self,
                           final_state: np.ndarray,
                           target_ee_pose: Dict,
                           final_base_state: Dict) -> float:
         """Calculate terminal cost for stability"""
-        # Terminal state error
-        ee_pos = final_state[12:15]
-        ee_ori = final_state[15:18]
+        # Use proper indexing from dynamics model
+        ee_pos = final_state[2*self.dynamics.n_q:2*self.dynamics.n_q + 3]
+        ee_ori = final_state[2*self.dynamics.n_q + 3:2*self.dynamics.n_q + 6]
         
-        # Position error at terminal state
+        # Position and orientation errors at terminal state
         pos_error = ee_pos - (target_ee_pose['position'] + final_base_state['position'])
+        ori_error = ee_ori - (target_ee_pose['orientation'] + final_base_state['orientation'])
         
         # Higher weights for terminal state
-        terminal_weight = 5.0
-        terminal_cost = terminal_weight * self.w_ee_pos * np.sum(pos_error**2)
+        terminal_weight = 8.0
+        terminal_cost = (terminal_weight * self.w_ee_pos * np.sum(pos_error**2) +
+                        terminal_weight * self.w_ee_ori * np.sum(ori_error**2))
         
         return terminal_cost
 
@@ -343,6 +262,20 @@ class URMPC:
             'fun': dynamics_constraint
         })
         
+        # Add constraint for smooth control changes
+        def control_smoothness_constraint(x):
+            control_sequence = x.reshape(self.horizon, self.dynamics.n_controls)
+            smoothness = []
+            for i in range(1, self.horizon):
+                diff = control_sequence[i] - control_sequence[i-1]
+                smoothness.append(np.sum(diff**2))
+            return -np.array(smoothness) + 1.0  # Limit maximum change
+        
+        constraints.append({
+            'type': 'ineq',
+            'fun': control_smoothness_constraint
+        })
+        
         return constraints
 
     def _get_bounds(self, x0: np.ndarray) -> List[Tuple[float, float]]:
@@ -374,93 +307,104 @@ class URMPC:
         omega = platform_ang_vel[2]  # positive is counter-clockwise
         
         # Calculate tangential velocity for counter-rotation
-        # When platform rotates clockwise (negative omega):
-        # The end-effector should move in the opposite direction in world frame
-        tangential_vel = -np.array([
-            omega * offset[1],     # Changed sign: -ω * y
-            -omega * offset[0],    # Changed sign: ω * x
+        tangential_vel = np.array([
+            -omega * offset[1],     # -ω * y
+            omega * offset[0],      # ω * x
             0.0
         ])
         
-        # Platform linear velocity compensation
-        platform_comp_vel = platform_vel
-        
-        # Total velocity combines both compensations
-        total_vel = platform_comp_vel + tangential_vel
-        
-        # Debug information
-        rospy.loginfo("=== Motion Transform Debug ===")
-        rospy.loginfo(f"Platform angular velocity: {platform_ang_vel}")
-        rospy.loginfo(f"Offset from rotation center: {offset}")
-        rospy.loginfo(f"Calculated tangential velocity: {tangential_vel}")
-        rospy.loginfo(f"Total compensation velocity: {total_vel}")
-        rospy.loginfo("============================")
+        # Total velocity combines both linear and tangential components
+        total_vel = platform_vel + tangential_vel
         
         transformed_state = base_state.copy()
         transformed_state['linear_velocity'] = total_vel
         transformed_state['position'] = base_state['position'] + offset
-        transformed_state['angular_velocity'] = platform_ang_vel  # Keep for orientation compensation
+        transformed_state['angular_velocity'] = platform_ang_vel
+        
+        # Debug information
+        rospy.loginfo("=== Motion Transform Debug ===")
+        rospy.loginfo(f"Platform velocity: {platform_vel}")
+        rospy.loginfo(f"Platform angular velocity: {platform_ang_vel}")
+        rospy.loginfo(f"Tangential velocity: {tangential_vel}")
+        rospy.loginfo(f"Total compensation velocity: {total_vel}")
+        rospy.loginfo("============================")
         
         return transformed_state
 
-    def _get_jacobian(self, joint_positions: np.ndarray) -> np.ndarray:
-        """Get the Jacobian matrix for the current configuration"""
-        try:
-            # Ensure joint_positions is a list (not numpy array)
-            if isinstance(joint_positions, np.ndarray):
-                joint_positions = joint_positions.tolist()
-            
-            # Get Jacobian directly using joint positions
-            J = self.move_group.get_jacobian_matrix(joint_positions)
-            
-            # Convert to numpy array and ensure correct shape (6x6)
-            J = np.array(J)
-            if J.shape != (6, 6):
-                rospy.logwarn(f"Unexpected Jacobian shape: {J.shape}, using fallback")
-                return np.eye(6)
-                
-            return J
-            
-        except Exception as e:
-            rospy.logerr(f"Failed to get Jacobian: {str(e)}")
-            return np.eye(6)
-
     def predict_base_motion(self, current_base_state: Dict, horizon: int) -> List[Dict]:
-        """
-        Predict base motion over the horizon
-        Args:
-            current_base_state: Current base state (position, orientation, velocities)
-            horizon: Number of prediction steps
-        Returns:
-            List of predicted base states over horizon
-        """
+        """Improved base motion prediction with acceleration consideration"""
         base_trajectory = []
         dt = self.dt
         
+        # Get current acceleration (could be estimated from velocity history)
+        if hasattr(self, 'prev_base_vel'):
+            base_accel = (current_base_state['linear_velocity'] - self.prev_base_vel) / dt
+        else:
+            base_accel = np.zeros(3)
+        
+        self.prev_base_vel = current_base_state['linear_velocity'].copy()
+        
         for k in range(horizon):
-            # Predict position using current velocity
-            predicted_pos = current_base_state['position'] + k * dt * current_base_state['linear_velocity']
+            # Predict velocity using acceleration
+            predicted_vel = current_base_state['linear_velocity'] + k * dt * base_accel
             
-            # Predict orientation using current angular velocity
-            predicted_ori = current_base_state['orientation'] + k * dt * current_base_state['angular_velocity']
+            # Predict position using updated velocity
+            predicted_pos = (current_base_state['position'] + 
+                            k * dt * current_base_state['linear_velocity'] +
+                            0.5 * k * dt**2 * base_accel)
             
-            # Store prediction (assuming constant velocities for now)
+            # Predict orientation (could be improved with angular acceleration)
+            predicted_ori = (current_base_state['orientation'] + 
+                            k * dt * current_base_state['angular_velocity'])
+            
             predicted_state = {
                 'position': predicted_pos.copy(),
                 'orientation': predicted_ori.copy(),
-                'linear_velocity': current_base_state['linear_velocity'].copy(),
+                'linear_velocity': predicted_vel.copy(),
                 'angular_velocity': current_base_state['angular_velocity'].copy()
             }
             
             base_trajectory.append(predicted_state)
-            
-            # Debug output for first and last prediction
-            if k == 0 or k == horizon-1:
-                rospy.loginfo(f"Base prediction at step {k}:")
-                rospy.loginfo(f"  Position: {predicted_pos}")
-                rospy.loginfo(f"  Orientation: {predicted_ori}")
         
         return base_trajectory
+
+    def _cost_function(self, x: np.ndarray, current_state: np.ndarray, 
+                      target_ee_pose: Dict, base_trajectory: List[Dict]) -> float:
+        """
+        Compute total cost over prediction horizon
+        Args:
+            x: Flattened control sequence
+            current_state: Current system state
+            target_ee_pose: Target end-effector pose
+            base_trajectory: Predicted base motion trajectory
+        Returns:
+            Total cost over horizon
+        """
+        # Reshape control sequence
+        control_sequence = x.reshape(self.horizon, self.dynamics.n_controls)
+        
+        # Initialize cost
+        total_cost = 0.0
+        x_current = current_state.copy()
+        
+        # Compute stage costs
+        for k in range(self.horizon):
+            # Get control input and base state for current stage
+            u_k = control_sequence[k]
+            base_k = base_trajectory[k]
+            
+            # Add stage cost
+            stage_cost = self.calculate_stage_cost(x_current, target_ee_pose, base_k, u_k, k)
+            total_cost += stage_cost
+            
+            # Predict next state
+            x_current = self.dynamics.predict_next_state(x_current, u_k)
+        
+        # Add terminal cost
+        terminal_cost = self.calculate_terminal_cost(x_current, target_ee_pose, base_trajectory[-1])
+        total_cost += terminal_cost
+        
+        return total_cost
 
 def main():
     """Test the MPC controller"""

@@ -48,7 +48,6 @@ Results:
 
 ### 5. Velocity Matching Focus (Fourth Phase)
 #### Changes:
-- Studied successful previous implementation (`ur_mpc_old.py`)
 - Modified cost function to prioritize velocity matching
 - Added explicit velocity compensation terms
 Results:
@@ -63,6 +62,7 @@ Results:
 - Focused too much on immediate state feedback
 
 #### Implemented True MPC Components:
+python
 # Model-based Prediction
 x_current = self.dynamics.predict_next_state(x_current, u_k)
 # Receding Horizon Control
@@ -94,6 +94,16 @@ terminal_cost = self.calculate_terminal_cost(x_current, target_ee_pose, base_tra
    - Prediction of base trajectory
    - Incorporation into cost function
    - Consideration in state evolution
+
+### 7. Stability and Performance Improvements (Sixth Phase)
+#### Identified Issues:
+- End-effector deviation from initial position
+- Small oscillations in position control
+- Orientation drift over time
+- Inconsistent base motion compensation
+
+#### Implemented Solutions:
+1. **Enhanced Cost Function Structure**:
 
 ## Current Technical Implementation
 

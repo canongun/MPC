@@ -1,46 +1,31 @@
 mpc_controller:
   # Simulation Mode
-  sim: False
+  sim: True
 
   # MPC Parameters
-  horizon: 10
+  horizon: 5
   dt: 0.05
   
   # Cost Function Weights
   weights:
-    position: 10.0
-    orientation: 2.0
-    control: 0.05
-  
-  # Motion Detection Thresholds
-  thresholds:
-    linear: 0.005
-    angular: 0.005
+    position: 8.0
+    orientation: 4.0
+    control: 0.02
+    damping: 0.5
   
   # Active Motion Weights
   active_weights:
     linear: 15.0
-    linear_idle: 1.0
-    angular: 5.0
-    angular_idle: 0.5
+    angular: 8.0
   
-  # Constraint Bounds (meters and radians)
-  bounds:
-    position: 0.005
-    orientation: 0.005
-  
-  # Joint Preferences (scaling factors)
-  joint_scales:
-    - 1.0  # joint 1
-    - 0.7  # joint 2
-    - 0.5  # joint 3
-    - 0.3  # joint 4
-    - 0.2  # joint 5
-    - 0.1  # joint 6
-    
   # Robot Configuration
   arm_base_offset:
     x: 0.06
     y: -0.1
     z: 0.09
     yaw: 3.14159  # pi radians
+
+  # Velocity scaling
+  velocity:
+    max_scale: 0.9
+    min_scale: 0.4
