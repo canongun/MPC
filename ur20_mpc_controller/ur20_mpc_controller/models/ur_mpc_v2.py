@@ -57,16 +57,13 @@ class URMPC:
                 current_ee_pose: Dict,
                 target_ee_pose: Dict,
                 base_state: Dict) -> np.ndarray:
-        start_time = rospy.Time.now()
         
+        base_vel_mag = np.linalg.norm(base_state['linear_velocity'])
+        if base_vel_mag < 0.01:
+            return np.zeros(self.dynamics.n_controls)
+
         # Transform base motion to arm base frame
         transformed_base_state = self._transform_base_motion(base_state)
-        
-        # Adjust target pose to account for base motion
-        adjusted_target_pose = {
-            'position': target_ee_pose['position'] - transformed_base_state['position'],
-            'orientation': target_ee_pose['orientation'] - transformed_base_state['orientation']
-        }
         
         # Get current state vector
         current_state = self.dynamics.get_state_vector(
@@ -74,10 +71,20 @@ class URMPC:
             current_ee_pose
         )
         
-        # Predict base motion over horizon (do this once)
+        # Predict base motion over horizon
         base_trajectory = self.predict_base_motion(transformed_base_state, self.horizon)
         
-        # Better initial guess
+        # Get initial guess using Jacobian
+        J = self.dynamics.get_jacobian(current_joint_state['position'])
+        J_pos = J[:3, :]
+        J_ori = J[3:, :]
+        
+        # Compute required velocities for both position and orientation
+        base_lin_vel = -transformed_base_state['linear_velocity'][:3]
+        base_ang_vel = -transformed_base_state['angular_velocity']
+        required_vel = np.concatenate([base_lin_vel, base_ang_vel])
+        
+        # Better initial guess with warm starting
         if self.previous_solution is not None:
             # Shift previous solution
             x0 = np.roll(self.previous_solution, -self.dynamics.n_controls)
@@ -92,66 +99,59 @@ class URMPC:
             for i in range(self.horizon):
                 x0[i*self.dynamics.n_controls:(i+1)*self.dynamics.n_controls] = initial_vel
         
-        # Add stability check
-        ee_error = np.linalg.norm(current_ee_pose['position'] - target_ee_pose['position'])
-        if ee_error > 0.01 and np.all(np.abs(base_state['linear_velocity']) < 0.01):
-            rospy.logwarn(f"End-effector deviating: {ee_error}m with no base motion")
-        
-        # Optimize with reduced tolerance
         try:
+            # Optimize over the entire horizon
             result = minimize(
-                fun=lambda x: self._cost_function(x, current_state, adjusted_target_pose, base_trajectory),
+                fun=lambda x: self._cost_function(x, current_state, target_ee_pose, base_trajectory),
                 x0=x0,
                 method='SLSQP',
                 bounds=self._get_bounds(x0),
-                constraints=self._get_constraints(current_state, transformed_base_state),
+                constraints=self._get_constraints(current_state, base_trajectory),
                 options={
-                    'ftol': 1e-2,      # Increase tolerance
-                    'maxiter': 10,      # Reduce iterations
-                    'disp': False,
-                    'eps': 1e-2        # Increase step size
+                    'ftol': 1e-2,
+                    'maxiter': 10,
+                    'eps': 1e-2,
+                    'disp': False
                 }
             )
             
-            # Store solution for warm start
-            self.previous_solution = result.x
-            
-            # Monitor computation time
-            compute_time = (rospy.Time.now() - start_time).to_sec()
-            rospy.loginfo(f"Computation time: {compute_time:.3f} s")
-            
-            # Get optimal control
+            # Get first control action (receding horizon principle)
             control = result.x[:self.dynamics.n_controls]
             
-            # Calculate distance to target
-            ee_error = np.linalg.norm(current_ee_pose['position'] - target_ee_pose['position'])
+            # Store solution for warm start in next iteration
+            self.previous_solution = result.x
             
-            # Modified velocity scaling for smoother motion
-            max_scale = rospy.get_param('~mpc_controller/velocity/max_scale', 0.9)
-            min_scale = rospy.get_param('~mpc_controller/velocity/min_scale', 0.4)
+            # Debug output
+            predicted_trajectory = self.predict_trajectory(current_state, 
+                                                         result.x.reshape(self.horizon, -1), 
+                                                         self.horizon)
+            ee_vel = J_pos @ control
+            ee_ang_vel = J_ori @ control
             
-            # Smoother scaling function
-            scale = min_scale + (max_scale - min_scale) * (1 - np.exp(-1.0 * ee_error))
+            rospy.loginfo(f"Base linear velocity: {base_state['linear_velocity']}")
+            rospy.loginfo(f"Base angular velocity: {base_state['angular_velocity']}")
+            rospy.loginfo(f"EE linear velocity: {ee_vel}")
+            rospy.loginfo(f"EE angular velocity: {ee_ang_vel}")
+            rospy.loginfo(f"Predicted final EE error: {predicted_trajectory[-1][2*self.dynamics.n_q:2*self.dynamics.n_q + 3] - target_ee_pose['position']}")
             
-            # Apply scaling with additional smoothing
-            if hasattr(self, 'prev_scale'):
-                scale = 0.7 * scale + 0.3 * self.prev_scale  # Smooth scale changes
-            self.prev_scale = scale
-            
-            control = scale * control
+            # Scale control based on base velocity
+            if base_vel_mag > 0.1:  # Fast motion
+                # Use simpler, faster compensation for high speeds
+                J = self.dynamics.get_jacobian(current_joint_state['position'])
+                base_vel = -transformed_base_state['linear_velocity'][:3]
+                fast_control = np.linalg.pinv(J[:3, :]) @ base_vel
+                
+                # Blend between MPC and fast compensation
+                alpha = min(1.0, (base_vel_mag - 0.1) / 0.2)  # Smooth transition
+                control = (1 - alpha) * control + alpha * fast_control
             
             return control
             
         except Exception as e:
-            rospy.logerr(f"Optimization error: {str(e)}")
-            return x0[:self.dynamics.n_controls]
+            rospy.logwarn(f"Failed to compute control: {str(e)}")
+            return initial_vel
 
-    def calculate_stage_cost(self, 
-                        state: np.ndarray,
-                        target_ee_pose: Dict,
-                        base_state: Dict,
-                        control: np.ndarray,
-                        k: int) -> float:
+    def calculate_stage_cost(self, state, target_ee_pose, base_state, control, k):
         """Calculate cost for a single stage in the prediction horizon"""
         # Get current end-effector state
         ee_pos = state[2*self.dynamics.n_q:2*self.dynamics.n_q + 3]
@@ -168,112 +168,91 @@ class URMPC:
         ee_ang_vel = J_ori @ control
         
         # Get base velocities for compensation
-        base_lin_vel = -base_state['linear_velocity'][:3]
-        base_ang_vel = -base_state['angular_velocity']
+        base_lin_vel = base_state['linear_velocity'][:3]
+        base_ang_vel = base_state['angular_velocity']
         
         # Velocity tracking errors
-        vel_error = ee_lin_vel - base_lin_vel
-        ori_vel_error = ee_ang_vel - base_ang_vel
+        lin_vel_error = ee_lin_vel + base_lin_vel
+        ang_vel_error = ee_ang_vel + base_ang_vel
         
         # Position and orientation errors
         pos_error = ee_pos - target_ee_pose['position']
         ori_error = ee_ori - target_ee_pose['orientation']
         
-        # Add damping terms to reduce oscillations
-        damping_cost = self.w_damping * (np.sum(ee_lin_vel**2) + np.sum(ee_ang_vel**2))
+        # Compute costs with appropriate weights
+        lin_vel_cost = 20.0 * np.sum(lin_vel_error**2)
+        ang_vel_cost = 10.0 * np.sum(ang_vel_error**2)
+        pos_cost = 1.0 * np.sum(pos_error**2)
+        ori_cost = 1.0 * np.sum(ori_error**2)
+        control_cost = 0.01 * np.sum(control**2)
         
-        # Time-varying weight (more aggressive at start, more damped later)
-        time_weight = 0.98**k  # Changed from 0.95 for smoother decay
+        # Time-varying weight
+        time_weight = 0.95**k
         
-        # Compute individual cost terms
-        pos_cost = (self.w_ee_pos * np.sum(pos_error**2) + 
-                    self.lin_weight_active * np.sum(vel_error**2))
-        
-        ori_cost = (self.w_ee_ori * np.sum(ori_error**2) + 
-                    self.ang_weight_active * np.sum(ori_vel_error**2))
-        
-        # Control cost with smoothness term
-        if k > 0 and hasattr(self, 'prev_control'):
-            control_smoothness = np.sum((control - self.prev_control)**2)
-            control_cost = (self.w_control * np.sum(control**2) + 
-                           0.1 * self.w_control * control_smoothness)
-        else:
-            control_cost = self.w_control * np.sum(control**2)
-        
-        self.prev_control = control.copy()
-        
-        return time_weight * (pos_cost + ori_cost + control_cost + damping_cost)
+        return time_weight * (lin_vel_cost + ang_vel_cost + pos_cost + ori_cost + control_cost)
 
-    def calculate_terminal_cost(self,
-                          final_state: np.ndarray,
-                          target_ee_pose: Dict,
-                          final_base_state: Dict) -> float:
-        """Calculate terminal cost for stability"""
-        # Use proper indexing from dynamics model
+    def calculate_terminal_cost(self, final_state, target_ee_pose, final_base_state):
+        """Calculate terminal cost for both position and orientation"""
         ee_pos = final_state[2*self.dynamics.n_q:2*self.dynamics.n_q + 3]
         ee_ori = final_state[2*self.dynamics.n_q + 3:2*self.dynamics.n_q + 6]
         
-        # Position and orientation errors at terminal state
-        pos_error = ee_pos - (target_ee_pose['position'] + final_base_state['position'])
-        ori_error = ee_ori - (target_ee_pose['orientation'] + final_base_state['orientation'])
+        # Get Jacobian
+        q = final_state[:self.dynamics.n_q]
+        J = self.dynamics.get_jacobian(q)
+        J_pos = J[:3, :]
+        J_ori = J[3:, :]
         
-        # Higher weights for terminal state
-        terminal_weight = 8.0
-        terminal_cost = (terminal_weight * self.w_ee_pos * np.sum(pos_error**2) +
-                        terminal_weight * self.w_ee_ori * np.sum(ori_error**2))
+        # Terminal velocities should match base velocities
+        terminal_lin_vel = J_pos @ final_state[self.dynamics.n_q:self.dynamics.n_q + self.dynamics.n_dq]
+        terminal_ang_vel = J_ori @ final_state[self.dynamics.n_q:self.dynamics.n_q + self.dynamics.n_dq]
         
-        return terminal_cost
+        base_lin_vel = final_base_state['linear_velocity'][:3]
+        base_ang_vel = final_base_state['angular_velocity']
+        
+        lin_vel_error = terminal_lin_vel + base_lin_vel
+        ang_vel_error = terminal_ang_vel + base_ang_vel
+        
+        pos_error = ee_pos - target_ee_pose['position']
+        ori_error = ee_ori - target_ee_pose['orientation']
+        
+        return (30.0 * np.sum(lin_vel_error**2) + 
+                15.0 * np.sum(ang_vel_error**2) + 
+                2.0 * np.sum(pos_error**2) + 
+                2.0 * np.sum(ori_error**2))
 
-    def _get_constraints(self, current_state: np.ndarray, base_state: Dict) -> List[Dict]:
-        """Updated constraints using dynamics model"""
+    def _get_constraints(self, current_state: np.ndarray, base_trajectory: List[Dict]) -> List[Dict]:
+        """Get optimization constraints over horizon"""
         constraints = []
         
         # Dynamic feasibility constraint
         def dynamics_constraint(x):
             control_sequence = x.reshape(self.horizon, self.dynamics.n_controls)
-            trajectory = self.dynamics.predict_trajectory(
-                current_state,
-                control_sequence,
-                self.horizon
-            )
-            # Return array of violations (negative when violated, positive when satisfied)
+            trajectory = self.predict_trajectory(current_state, control_sequence, self.horizon)
+            
+            # Check joint limits and velocity limits
             violations = []
             for state in trajectory:
                 q = state[:self.dynamics.n_q]
                 dq = state[self.dynamics.n_q:self.dynamics.n_q + self.dynamics.n_dq]
                 
-                # Position limits
+                # Joint position limits
                 pos_violations = np.minimum(
                     q - self.dynamics.joint_pos_limits[:, 0],  # Lower bounds
                     self.dynamics.joint_pos_limits[:, 1] - q   # Upper bounds
                 )
                 
-                # Velocity limits
+                # Joint velocity limits
                 vel_limits = np.array(list(self.dynamics.joint_vel_limits.values()))
                 vel_violations = vel_limits - np.abs(dq)
                 
                 violations.extend(pos_violations)
                 violations.extend(vel_violations)
-                
+            
             return np.array(violations)
         
         constraints.append({
             'type': 'ineq',
             'fun': dynamics_constraint
-        })
-        
-        # Add constraint for smooth control changes
-        def control_smoothness_constraint(x):
-            control_sequence = x.reshape(self.horizon, self.dynamics.n_controls)
-            smoothness = []
-            for i in range(1, self.horizon):
-                diff = control_sequence[i] - control_sequence[i-1]
-                smoothness.append(np.sum(diff**2))
-            return -np.array(smoothness) + 1.0  # Limit maximum change
-        
-        constraints.append({
-            'type': 'ineq',
-            'fun': control_smoothness_constraint
         })
         
         return constraints
@@ -291,48 +270,12 @@ class URMPC:
         return bounds
 
     def _transform_base_motion(self, base_state: Dict) -> Dict:
-        """Transform base motion from mobile base frame to arm base frame"""
-        # Get platform velocities
-        platform_vel = base_state['linear_velocity']
-        platform_ang_vel = base_state['angular_velocity']
-        
-        # Get offset vector from rotation center to arm base
-        offset = np.array([
-            self.arm_base_offset['x'],
-            self.arm_base_offset['y'],
-            self.arm_base_offset['z']
-        ])
-        
-        # For rotation around z-axis
-        omega = platform_ang_vel[2]  # positive is counter-clockwise
-        
-        # Calculate tangential velocity for counter-rotation
-        tangential_vel = np.array([
-            -omega * offset[1],     # -ω * y
-            omega * offset[0],      # ω * x
-            0.0
-        ])
-        
-        # Total velocity combines both linear and tangential components
-        total_vel = platform_vel + tangential_vel
-        
+        # Simplified transformation - just copy the state
         transformed_state = base_state.copy()
-        transformed_state['linear_velocity'] = total_vel
-        transformed_state['position'] = base_state['position'] + offset
-        transformed_state['angular_velocity'] = platform_ang_vel
-        
-        # Debug information
-        rospy.loginfo("=== Motion Transform Debug ===")
-        rospy.loginfo(f"Platform velocity: {platform_vel}")
-        rospy.loginfo(f"Platform angular velocity: {platform_ang_vel}")
-        rospy.loginfo(f"Tangential velocity: {tangential_vel}")
-        rospy.loginfo(f"Total compensation velocity: {total_vel}")
-        rospy.loginfo("============================")
-        
         return transformed_state
 
     def predict_base_motion(self, current_base_state: Dict, horizon: int) -> List[Dict]:
-        """Improved base motion prediction with acceleration consideration"""
+        """Predict base motion over horizon"""
         base_trajectory = []
         dt = self.dt
         
@@ -370,26 +313,17 @@ class URMPC:
 
     def _cost_function(self, x: np.ndarray, current_state: np.ndarray, 
                       target_ee_pose: Dict, base_trajectory: List[Dict]) -> float:
-        """
-        Compute total cost over prediction horizon
-        Args:
-            x: Flattened control sequence
-            current_state: Current system state
-            target_ee_pose: Target end-effector pose
-            base_trajectory: Predicted base motion trajectory
-        Returns:
-            Total cost over horizon
-        """
+        """True MPC cost function evaluating the entire trajectory"""
         # Reshape control sequence
         control_sequence = x.reshape(self.horizon, self.dynamics.n_controls)
         
-        # Initialize cost
+        # Initialize cost and state
         total_cost = 0.0
         x_current = current_state.copy()
         
-        # Compute stage costs
+        # Evaluate cost over the entire horizon
         for k in range(self.horizon):
-            # Get control input and base state for current stage
+            # Get control input and predicted base state for current stage
             u_k = control_sequence[k]
             base_k = base_trajectory[k]
             
@@ -397,7 +331,7 @@ class URMPC:
             stage_cost = self.calculate_stage_cost(x_current, target_ee_pose, base_k, u_k, k)
             total_cost += stage_cost
             
-            # Predict next state
+            # Predict next state using dynamics model
             x_current = self.dynamics.predict_next_state(x_current, u_k)
         
         # Add terminal cost
@@ -405,6 +339,24 @@ class URMPC:
         total_cost += terminal_cost
         
         return total_cost
+
+    def predict_trajectory(self, initial_state: np.ndarray, 
+                          control_sequence: np.ndarray, 
+                          horizon: int) -> List[np.ndarray]:
+        """Predict state trajectory over horizon"""
+        trajectory = [initial_state]
+        current_state = initial_state.copy()
+        
+        for k in range(horizon):
+            next_state = self.dynamics.predict_next_state(
+                current_state,
+                control_sequence[k],
+                self.dt
+            )
+            trajectory.append(next_state)
+            current_state = next_state
+        
+        return trajectory
 
 def main():
     """Test the MPC controller"""
