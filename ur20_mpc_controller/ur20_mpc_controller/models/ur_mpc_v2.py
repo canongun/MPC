@@ -58,8 +58,15 @@ class URMPC:
                 target_ee_pose: Dict,
                 base_state: Dict) -> np.ndarray:
         
+        # Check both linear and angular velocity
         base_vel_mag = np.linalg.norm(base_state['linear_velocity'])
-        if base_vel_mag < 0.01:
+        base_ang_mag = np.linalg.norm(base_state['angular_velocity'])
+        
+        # Debug prints
+        rospy.loginfo(f"Base linear velocity magnitude: {base_vel_mag}")
+        rospy.loginfo(f"Base angular velocity magnitude: {base_ang_mag}")
+        
+        if base_vel_mag < 0.01 and base_ang_mag < 0.01:
             return np.zeros(self.dynamics.n_controls)
 
         # Transform base motion to arm base frame
@@ -82,20 +89,23 @@ class URMPC:
         # Compute required velocities for both position and orientation
         base_lin_vel = -transformed_base_state['linear_velocity'][:3]
         base_ang_vel = -transformed_base_state['angular_velocity']
-        required_vel = np.concatenate([base_lin_vel, base_ang_vel])
         
-        # Better initial guess with warm starting
+        # Combine into full velocity vector
+        J_full = np.vstack([J_pos, J_ori])
+        base_vel_full = np.concatenate([base_lin_vel, base_ang_vel])
+        
+        # Compute initial velocities using damped least squares
+        lambda_ = 0.01
+        J_pinv = J_full.T @ np.linalg.inv(J_full @ J_full.T + lambda_ * np.eye(6))
+        initial_vel = J_pinv @ base_vel_full
+        
+        # Initialize control sequence with warm starting
         if self.previous_solution is not None:
             # Shift previous solution
             x0 = np.roll(self.previous_solution, -self.dynamics.n_controls)
-            x0[-self.dynamics.n_controls:] = self.previous_solution[-self.dynamics.n_controls:]
+            x0[-self.dynamics.n_controls:] = initial_vel
         else:
             x0 = np.zeros(self.dynamics.n_controls * self.horizon)
-            # Initialize using Jacobian
-            J = self.dynamics.get_jacobian(current_joint_state['position'])
-            base_vel = -transformed_base_state['linear_velocity'][:3]
-            initial_vel = np.linalg.pinv(J[:3, :]) @ base_vel
-            # Apply to all horizon steps
             for i in range(self.horizon):
                 x0[i*self.dynamics.n_controls:(i+1)*self.dynamics.n_controls] = initial_vel
         
@@ -110,8 +120,7 @@ class URMPC:
                 options={
                     'ftol': 1e-2,
                     'maxiter': 10,
-                    'eps': 1e-2,
-                    'disp': False
+                    'eps': 1e-2
                 }
             )
             
@@ -133,17 +142,6 @@ class URMPC:
             rospy.loginfo(f"EE linear velocity: {ee_vel}")
             rospy.loginfo(f"EE angular velocity: {ee_ang_vel}")
             rospy.loginfo(f"Predicted final EE error: {predicted_trajectory[-1][2*self.dynamics.n_q:2*self.dynamics.n_q + 3] - target_ee_pose['position']}")
-            
-            # Scale control based on base velocity
-            if base_vel_mag > 0.1:  # Fast motion
-                # Use simpler, faster compensation for high speeds
-                J = self.dynamics.get_jacobian(current_joint_state['position'])
-                base_vel = -transformed_base_state['linear_velocity'][:3]
-                fast_control = np.linalg.pinv(J[:3, :]) @ base_vel
-                
-                # Blend between MPC and fast compensation
-                alpha = min(1.0, (base_vel_mag - 0.1) / 0.2)  # Smooth transition
-                control = (1 - alpha) * control + alpha * fast_control
             
             return control
             
@@ -179,17 +177,21 @@ class URMPC:
         pos_error = ee_pos - target_ee_pose['position']
         ori_error = ee_ori - target_ee_pose['orientation']
         
-        # Compute costs with appropriate weights
-        lin_vel_cost = 20.0 * np.sum(lin_vel_error**2)
-        ang_vel_cost = 10.0 * np.sum(ang_vel_error**2)
-        pos_cost = 1.0 * np.sum(pos_error**2)
-        ori_cost = 1.0 * np.sum(ori_error**2)
+        # Compute costs with time-varying weights
+        decay = 0.95**k  # Weight decay over horizon
+        
+        # Primary objectives (velocity matching)
+        lin_vel_cost = 20.0 * decay * np.sum(lin_vel_error**2)
+        ang_vel_cost = 30.0 * decay * np.sum(ang_vel_error**2)
+        
+        # Secondary objectives (position and orientation holding)
+        pos_cost = 1.0 * decay * np.sum(pos_error**2)
+        ori_cost = 2.0 * decay * np.sum(ori_error**2)
+        
+        # Control regularization
         control_cost = 0.01 * np.sum(control**2)
         
-        # Time-varying weight
-        time_weight = 0.95**k
-        
-        return time_weight * (lin_vel_cost + ang_vel_cost + pos_cost + ori_cost + control_cost)
+        return lin_vel_cost + ang_vel_cost + pos_cost + ori_cost + control_cost
 
     def calculate_terminal_cost(self, final_state, target_ee_pose, final_base_state):
         """Calculate terminal cost for both position and orientation"""
@@ -270,8 +272,45 @@ class URMPC:
         return bounds
 
     def _transform_base_motion(self, base_state: Dict) -> Dict:
-        # Simplified transformation - just copy the state
+        """Transform base motion from mobile base frame to arm base frame"""
+        # Get platform velocities
+        platform_vel = base_state['linear_velocity']
+        platform_ang_vel = base_state['angular_velocity']
+        
+        # Get offset vector from rotation center to arm base
+        offset = np.array([
+            self.arm_base_offset['x'],
+            self.arm_base_offset['y'],
+            self.arm_base_offset['z']
+        ])
+        
+        # For rotation around z-axis
+        omega = platform_ang_vel[2]  # positive is counter-clockwise
+        
+        # Calculate tangential velocity for counter-rotation
+        tangential_vel = np.array([
+            -omega * offset[1],     # -ω * y
+            omega * offset[0],      # ω * x
+            0.0
+        ])
+        
+        # Total velocity combines both linear and tangential components
+        total_vel = platform_vel + tangential_vel
+        
         transformed_state = base_state.copy()
+        transformed_state['linear_velocity'] = total_vel
+        transformed_state['position'] = base_state['position'] + offset
+        transformed_state['angular_velocity'] = platform_ang_vel
+        
+        # Debug information
+        rospy.loginfo("=== Motion Transform Debug ===")
+        rospy.loginfo(f"Platform velocity: {platform_vel}")
+        rospy.loginfo(f"Platform angular velocity: {platform_ang_vel}")
+        rospy.loginfo(f"Offset from rotation center: {offset}")
+        rospy.loginfo(f"Tangential velocity: {tangential_vel}")
+        rospy.loginfo(f"Total compensation velocity: {total_vel}")
+        rospy.loginfo("============================")
+        
         return transformed_state
 
     def predict_base_motion(self, current_base_state: Dict, horizon: int) -> List[Dict]:
