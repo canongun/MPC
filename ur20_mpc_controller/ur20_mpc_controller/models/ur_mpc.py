@@ -7,40 +7,49 @@ import moveit_commander
 from typing import Dict, Tuple, List
 
 from ur20_mpc_controller.models.base_estimator import BaseMotionEstimator
+from ur20_mpc_controller.models.ur20_dynamics import UR20Dynamics
+
+class OptimizationError(Exception):
+    """Raised when MPC optimization fails"""
+    pass
 
 class URMPC:
     def __init__(self):
+        """Initialize MPC controller for UR20 mobile manipulation
+        
+        State vector structure:
+        - joint_positions (6): Current joint angles
+        - joint_velocities (6): Current joint velocities  
+        - ee_position (3): End-effector position in world frame
+        - ee_orientation (3): End-effector orientation in euler angles
+        """
         # Initialize ROS node
         moveit_commander.roscpp_initialize([])
         self.robot = moveit_commander.RobotCommander()
         self.move_group = moveit_commander.MoveGroupCommander("arm")
         
+        # Initialize dynamics model
+        self.dynamics: UR20Dynamics = UR20Dynamics()
+        
         # Load parameters from config
-        self.horizon = rospy.get_param('~mpc_controller/horizon', 15)
-        self.dt = rospy.get_param('~mpc_controller/dt', 0.05)
+        self.horizon: int = rospy.get_param('~mpc_controller/horizon', 3)  # Match config default
+        self.dt: float = rospy.get_param('~mpc_controller/dt', 0.05)
         
-        # Load weights
-        self.w_ee_pos = rospy.get_param('~mpc_controller/weights/position', 10.0)
-        self.w_ee_ori = rospy.get_param('~mpc_controller/weights/orientation', 2.0)
-        self.w_control = rospy.get_param('~mpc_controller/weights/control', 0.05)
+        # Add parameter validation
+        if self.horizon <= 0:
+            raise ValueError("Horizon must be positive")
+        if self.dt <= 0:
+            raise ValueError("Time step must be positive")
         
-        # Load thresholds
-        self.lin_threshold = rospy.get_param('~mpc_controller/thresholds/linear', 0.005)
-        self.ang_threshold = rospy.get_param('~mpc_controller/thresholds/angular', 0.005)
+        # Load all weights from params
+        self.w_position = rospy.get_param('~mpc_controller/weights/position', 3.0)
+        self.w_orientation = rospy.get_param('~mpc_controller/weights/orientation', 2.0)
+        self.w_control = rospy.get_param('~mpc_controller/weights/control', 0.005)
+        self.w_smooth = rospy.get_param('~mpc_controller/weights/smooth', 0.02)
         
-        # Load active weights
-        self.lin_weight_active = rospy.get_param('~mpc_controller/active_weights/linear', 15.0)
-        self.lin_weight_idle = rospy.get_param('~mpc_controller/active_weights/linear_idle', 1.0)
-        self.ang_weight_active = rospy.get_param('~mpc_controller/active_weights/angular', 5.0)
-        self.ang_weight_idle = rospy.get_param('~mpc_controller/active_weights/angular_idle', 0.5)
-        
-        # Load bounds
-        self.pos_bound = rospy.get_param('~mpc_controller/bounds/position', 0.005)
-        self.ori_bound = rospy.get_param('~mpc_controller/bounds/orientation', 0.005)
-        
-        # Load joint scales
-        self.joint_scales = np.array(rospy.get_param('~mpc_controller/joint_scales', 
-            [1.0, 0.7, 0.5, 0.3, 0.2, 0.1]))
+        # Load active motion weights
+        self.w_linear = rospy.get_param('~mpc_controller/active_weights/linear', 50.0)
+        self.w_angular = rospy.get_param('~mpc_controller/active_weights/angular', 5.0)
         
         # Load robot configuration
         self.arm_base_offset = {
@@ -50,249 +59,282 @@ class URMPC:
             'yaw': rospy.get_param('~mpc_controller/arm_base_offset/yaw', np.pi)
         }
         
-        # State and control limits
-        self.joint_pos_limits = np.array([  # [min, max] for each joint
-            [-2*np.pi, 2*np.pi],  # Joint 1
-            [-2*np.pi, 2*np.pi],  # Joint 2
-            [-2*np.pi, 2*np.pi],  # Joint 3
-            [-2*np.pi, 2*np.pi],  # Joint 4
-            [-2*np.pi, 2*np.pi],  # Joint 5
-            [-2*np.pi, 2*np.pi]   # Joint 6
-        ])
-        
-        # Add joint velocity limits
-        self.joint_vel_limits = {
-            'shoulder_pan_joint': 2.094395102393195,
-            'shoulder_lift_joint': 2.094395102393195,
-            'elbow_joint': 2.617993877991494,
-            'wrist_1_joint': 3.665191429188092,
-            'wrist_2_joint': 3.665191429188092,
-            'wrist_3_joint': 3.665191429188092
-        }
-        
         self.base_estimator = BaseMotionEstimator()
+        self.previous_solution = None
+        
+        # Add damping weight
+        self.w_damping = rospy.get_param('~mpc_controller/weights/damping', 0.5)
         
     def compute_control(self, 
                 current_joint_state: Dict,
                 current_ee_pose: Dict,
                 target_ee_pose: Dict,
                 base_state: Dict) -> np.ndarray:
-        """Compute optimal joint velocities using MPC"""
-        # Transform base motion to arm base frame
-        transformed_base_state = self._transform_base_motion(base_state)
+        """Compute optimal control action using MPC
         
-        # Initial guess - Modified for horizon
-        x0 = np.zeros(12 * self.horizon)  # Changed from 12 to 12 * horizon
-        x0[:6] = current_joint_state['position']
-        
-        # Get full Jacobian
-        J = self._get_jacobian(current_joint_state['position'])
-        J_pos = J[:3, :]
-        J_ori = J[3:, :]
-        
-        # Get base velocities in arm frame (invert linear velocity)
-        base_lin_vel = -transformed_base_state['linear_velocity'][:3]
-        base_ang_vel = -transformed_base_state['angular_velocity']
-        
+        Args:
+            current_joint_state: Current joint positions and velocities
+            current_ee_pose: Current end-effector pose
+            target_ee_pose: Target end-effector pose
+            base_state: Current base state
+            
+        Returns:
+            Optimal joint velocity commands
+            
+        Raises:
+            OptimizationError: If optimization fails to converge
+            ValueError: If inputs are invalid
+        """
         try:
-            # Compute initial velocities using pseudoinverse for both position and orientation
+            # Check both linear and angular velocity
+            base_vel_mag = np.linalg.norm(base_state['linear_velocity'])
+            base_ang_mag = np.linalg.norm(base_state['angular_velocity'])
+            
+            # Debug prints
+            rospy.loginfo(f"Base linear velocity magnitude: {base_vel_mag}")
+            rospy.loginfo(f"Base angular velocity magnitude: {base_ang_mag}")
+            
+            if base_vel_mag < 0.01 and base_ang_mag < 0.01:
+                return np.zeros(self.dynamics.n_controls)
+
+            # Transform base motion to arm base frame
+            transformed_base_state = self._transform_base_motion(base_state)
+            
+            # Get current state vector
+            current_state = self.dynamics.get_state_vector(
+                current_joint_state, 
+                current_ee_pose
+            )
+            
+            # Predict base motion over horizon
+            base_trajectory = self.predict_base_motion(transformed_base_state, self.horizon)
+            
+            # Get initial guess using Jacobian
+            J = self.dynamics.get_jacobian(current_joint_state['position'])
+            J_pos = J[:3, :]
+            J_ori = J[3:, :]
+            
+            # Compute required velocities for both position and orientation
+            base_lin_vel = -transformed_base_state['linear_velocity'][:3]
+            base_ang_vel = -transformed_base_state['angular_velocity']
+            
+            # Combine into full velocity vector
             J_full = np.vstack([J_pos, J_ori])
             base_vel_full = np.concatenate([base_lin_vel, base_ang_vel])
-            initial_velocities = np.linalg.pinv(J_full) @ base_vel_full
             
-            # Set initial velocities for all horizon steps
-            for i in range(self.horizon):
-                x0[6+i*12:12+i*12] = initial_velocities  # Added this loop
-                
-        except Exception as e:
-            rospy.logwarn(f"Failed to compute initial guess using Jacobian: {str(e)}")
-            base_vel_magnitude = np.linalg.norm(np.concatenate([base_lin_vel, base_ang_vel]))
-            initial_velocities = self.joint_scales * base_vel_magnitude
+            # Compute initial velocities using damped least squares
+            lambda_ = 0.01
+            J_pinv = J_full.T @ np.linalg.inv(J_full @ J_full.T + lambda_ * np.eye(6))
+            initial_vel = J_pinv @ base_vel_full
             
-            # Set initial velocities for all horizon steps
-            for i in range(self.horizon):
-                x0[6+i*12:12+i*12] = initial_velocities  # Added this loop
-        
-        try:
+            # Initialize control sequence with warm starting
+            if self.previous_solution is not None:
+                # Shift previous solution
+                x0 = np.roll(self.previous_solution, -self.dynamics.n_controls)
+                x0[-self.dynamics.n_controls:] = initial_vel
+            else:
+                x0 = np.zeros(self.dynamics.n_controls * self.horizon)
+                for i in range(self.horizon):
+                    x0[i*self.dynamics.n_controls:(i+1)*self.dynamics.n_controls] = initial_vel
+            
+            # Improve optimization parameters
             result = minimize(
-                fun=lambda x: self._cost_function(
-                    x, 
-                    current_joint_state,
-                    current_ee_pose,
-                    target_ee_pose,
-                    transformed_base_state
-                ),
+                fun=lambda x: self._cost_function(x, current_state, target_ee_pose, base_trajectory),
                 x0=x0,
                 method='SLSQP',
                 bounds=self._get_bounds(x0),
-                constraints=self._get_constraints(x0, current_ee_pose, transformed_base_state),
+                constraints=self._get_constraints(current_state, base_trajectory),
                 options={
-                    'ftol': 1e-4,
-                    'maxiter': 50,
-                    'disp': True
+                    'ftol': 1e-3,
+                    'maxiter': 50,  # Increased iterations
+                    'eps': 1e-3,
+                    'disp': True  # Show optimization progress
                 }
             )
             
             if not result.success:
-                rospy.logwarn(f"MPC optimization failed: {result.message}")
-                return x0[6:12]  # Return first timestep velocities
-                
-            return result.x[6:12]  # Return first timestep velocities
+                raise OptimizationError(f"Optimization failed: {result.message}")
             
-        except Exception as e:
+            # Get first control action (receding horizon principle)
+            control = result.x[:self.dynamics.n_controls]
+            
+            # Add control smoothing
+            if hasattr(self, 'previous_control'):
+                alpha = 0.7  # Smoothing factor (0.7 means 70% new, 30% old)
+                control = alpha * control + (1 - alpha) * self.previous_control
+            
+            # Store for next iteration
+            self.previous_control = control.copy()
+            
+            # Store solution for warm start in next iteration
+            self.previous_solution = result.x
+            
+            # Debug output
+            predicted_trajectory = self.predict_trajectory(current_state, 
+                                                         result.x.reshape(self.horizon, -1), 
+                                                         self.horizon)
+            ee_vel = J_pos @ control
+            ee_ang_vel = J_ori @ control
+            
+            rospy.loginfo(f"Base linear velocity: {base_state['linear_velocity']}")
+            rospy.loginfo(f"Base angular velocity: {base_state['angular_velocity']}")
+            rospy.loginfo(f"EE linear velocity: {ee_vel}")
+            rospy.loginfo(f"EE angular velocity: {ee_ang_vel}")
+            rospy.loginfo(f"Predicted final EE error: {predicted_trajectory[-1][2*self.dynamics.n_q:2*self.dynamics.n_q + 3] - target_ee_pose['position']}")
+            
+            return control
+            
+        except OptimizationError as e:
             rospy.logerr(f"Optimization error: {str(e)}")
-            return x0[6:12]  # Return first timestep velocities
+            return initial_vel
+        except ValueError as e:
+            rospy.logerr(f"Invalid input: {str(e)}")
+            return np.zeros(self.dynamics.n_controls)
+        except Exception as e:
+            rospy.logerr(f"Unexpected error: {str(e)}")
+            return np.zeros(self.dynamics.n_controls)
 
-    def _cost_function(self, x, current_joint_state, current_ee_pose, target_ee_pose, base_state):
-        # Keep the current timestep calculation exactly as is
-        current_cost = self._compute_current_cost(
-            x[6:12],  # Current joint velocities
-            current_joint_state,
-            base_state
-        )
+    def calculate_stage_cost(self, state, target_ee_pose, base_state, control, k):
+        """Calculate cost for a single stage in the prediction horizon"""
+        # Get current end-effector state
+        ee_pos = state[2*self.dynamics.n_q:2*self.dynamics.n_q + 3]
+        ee_ori = state[2*self.dynamics.n_q + 3:2*self.dynamics.n_q + 6]
         
-        # Add future cost terms if horizon > 1
-        future_cost = 0.0
-        if self.horizon > 1:
-            try:
-                # Only add future predictions if they exist
-                for i in range(1, self.horizon):
-                    future_velocities = x[6+i*12:12+i*12]
-                    # Use a decreasing weight for future terms
-                    weight = 0.8**i  # Exponential decay of importance
-                    future_cost += weight * self._compute_current_cost(
-                        future_velocities,
-                        current_joint_state,  # Use current state as reference
-                        base_state  # Use current base state (conservative)
-                    )
-            except Exception as e:
-                rospy.logwarn(f"Future cost computation failed: {e}")
-                # If future computation fails, fall back to current cost only
-                return current_cost
-                
-        return current_cost + 0.5 * future_cost  # Weight future less than present
-
-    def _compute_current_cost(self, joint_velocities, joint_state, base_state):
-        """Existing cost computation - exactly as before"""
-        # Get full Jacobian (including orientation)
-        J = self._get_jacobian(joint_state['position'])
+        # Get Jacobian for velocity computation
+        q = state[:self.dynamics.n_q]
+        J = self.dynamics.get_jacobian(q)
         J_pos = J[:3, :]
         J_ori = J[3:, :]
         
-        # End-effector velocities (both linear and angular)
-        ee_lin_vel = J_pos @ joint_velocities
-        ee_ang_vel = J_ori @ joint_velocities
+        # Calculate end-effector velocities
+        ee_lin_vel = J_pos @ control
+        ee_ang_vel = J_ori @ control
         
-        # Base velocities (invert both linear and angular velocities)
-        base_lin_vel = -base_state['linear_velocity'][:3]    
-        base_ang_vel = -base_state['angular_velocity']       
+        # Get base velocities for compensation
+        base_lin_vel = base_state['linear_velocity'][:3]
+        base_ang_vel = base_state['angular_velocity']
         
-        # Compensation errors
-        pos_compensation_error = ee_lin_vel - base_lin_vel
-        ori_compensation_error = ee_ang_vel - base_ang_vel
+        # Velocity tracking errors
+        lin_vel_error = ee_lin_vel + base_lin_vel
+        ang_vel_error = ee_ang_vel + base_ang_vel
         
-        # Detect active motion directions
-        active_lin_dirs = np.abs(base_lin_vel) > 0.005
-        active_ang_dirs = np.abs(base_ang_vel) > 0.005
+        # Position and orientation errors
+        pos_error = ee_pos - target_ee_pose['position']
+        ori_error = ee_ori - target_ee_pose['orientation']
         
-        # Weight compensation errors
-        lin_weights = np.where(active_lin_dirs, 15.0, 1.0)
-        ang_weights = np.where(active_ang_dirs, 5.0, 0.5)
+        # Compute costs with time-varying weights
+        decay = 0.95**k  # Weight decay over horizon
         
-        # Compute costs
-        position_cost = np.sum((lin_weights * pos_compensation_error)**2)
-        orientation_cost = np.sum((ang_weights * ori_compensation_error)**2)
-        damping_cost = np.sum(joint_velocities**2) * 0.1
+        # Primary objectives (velocity matching)
+        lin_vel_cost = self.w_linear * decay * np.sum(lin_vel_error**2)
+        ang_vel_cost = self.w_angular * decay * np.sum(ang_vel_error**2)
         
-        return position_cost + self.w_ee_ori * orientation_cost + damping_cost
+        # Secondary objectives (position and orientation holding)
+        pos_cost = self.w_position * decay * np.sum(pos_error**2)
+        ori_cost = self.w_orientation * decay * np.sum(ori_error**2)
+        
+        # Control regularization
+        control_cost = self.w_control * np.sum(control**2)
+        
+        return lin_vel_cost + ang_vel_cost + pos_cost + ori_cost + control_cost
 
+    def calculate_terminal_cost(self, final_state, target_ee_pose, final_base_state):
+        """Calculate terminal cost for both position and orientation"""
+        ee_pos = final_state[2*self.dynamics.n_q:2*self.dynamics.n_q + 3]
+        ee_ori = final_state[2*self.dynamics.n_q + 3:2*self.dynamics.n_q + 6]
         
-    def _get_bounds(self, x0: np.ndarray) -> List[Tuple[float, float]]:
-        """Get bounds for optimization variables"""
-        bounds = []
+        # Get Jacobian
+        q = final_state[:self.dynamics.n_q]
+        J = self.dynamics.get_jacobian(q)
+        J_pos = J[:3, :]
+        J_ori = J[3:, :]
         
-        # For each timestep in horizon
-        for i in range(self.horizon):
-            # Position bounds for current timestep
-            for j in range(6):
-                bounds.append((self.joint_pos_limits[j][0], 
-                            self.joint_pos_limits[j][1]))
-            # Velocity bounds for current timestep
-            for j in range(6):
-                bounds.append((self.joint_vel_limits[0], 
-                            self.joint_vel_limits[1]))
-        return bounds
-    
-    def _get_current_ee_pose(self, joint_positions: np.ndarray) -> Dict:
-        """Get current end-effector pose using MoveIt"""
-        # Set the joint positions
-        self.move_group.set_joint_value_target(joint_positions)
+        # Terminal velocities should match base velocities
+        terminal_lin_vel = J_pos @ final_state[self.dynamics.n_q:self.dynamics.n_q + self.dynamics.n_dq]
+        terminal_ang_vel = J_ori @ final_state[self.dynamics.n_q:self.dynamics.n_q + self.dynamics.n_dq]
         
-        # Get the pose
-        current_pose = self.move_group.get_current_pose(end_effector_link = "gripper_end_tool_link").pose
+        base_lin_vel = final_base_state['linear_velocity'][:3]
+        base_ang_vel = final_base_state['angular_velocity']
         
-        return {
-            'position': np.array([
-                current_pose.position.x,
-                current_pose.position.y,
-                current_pose.position.z
-            ]),
-            'orientation': np.array([
-                current_pose.orientation.x,
-                current_pose.orientation.y,
-                current_pose.orientation.z,
-                current_pose.orientation.w
-            ])
-        }
+        lin_vel_error = terminal_lin_vel + base_lin_vel
+        ang_vel_error = terminal_ang_vel + base_ang_vel
+        
+        pos_error = ee_pos - target_ee_pose['position']
+        ori_error = ee_ori - target_ee_pose['orientation']
+        
+        return (self.w_linear * 2.0 * np.sum(lin_vel_error**2) + 
+                self.w_angular * 2.0 * np.sum(ang_vel_error**2) + 
+                self.w_position * np.sum(pos_error**2) + 
+                self.w_orientation * np.sum(ori_error**2))
 
-    def _get_constraints(self, x0: np.ndarray, current_ee_pose: Dict, base_state: Dict) -> List[Dict]:
-        """Update constraints for better compensation in all directions"""
+    def _get_constraints(self, current_state: np.ndarray, base_trajectory: List[Dict]) -> List[Dict]:
+        """Get optimization constraints over horizon"""
         constraints = []
         
-        # Velocity constraints for all timesteps in horizon
-        for i in range(self.horizon):
-            idx_start = 6 + i*12  # Start index for velocities at timestep i
-            idx_end = 12 + i*12   # End index for velocities at timestep i
-            constraints.append({
-                'type': 'ineq',
-                'fun': lambda x, idx_s=idx_start, idx_e=idx_end: 
-                    self.joint_vel_limits[1] - np.abs(x[idx_s:idx_e])
-            })
+        # Dynamic feasibility constraint
+        def dynamics_constraint(x):
+            control_sequence = x.reshape(self.horizon, self.dynamics.n_controls)
+            trajectory = self.predict_trajectory(current_state, control_sequence, self.horizon)
+            
+            # Check joint limits and velocity limits
+            violations = []
+            for state in trajectory:
+                q = state[:self.dynamics.n_q]
+                dq = state[self.dynamics.n_q:self.dynamics.n_q + self.dynamics.n_dq]
+                
+                # Joint position limits
+                pos_violations = np.minimum(
+                    q - self.dynamics.joint_pos_limits[:, 0],  # Lower bounds
+                    self.dynamics.joint_pos_limits[:, 1] - q   # Upper bounds
+                )
+                
+                # Joint velocity limits
+                vel_limits = np.array(list(self.dynamics.joint_vel_limits.values()))
+                vel_violations = vel_limits - np.abs(dq)
+                
+                violations.extend(pos_violations)
+                violations.extend(vel_violations)
+            
+            return np.array(violations)
         
-        def ee_motion_constraint(x):
-            # For first timestep only (most critical)
-            J = self._get_jacobian(x[:6])
-            ee_vel = J @ x[6:12]  # Use first timestep velocities
-            
-            pos_vel = ee_vel[:3]
-            ori_vel = ee_vel[3:]
-            
-            # Invert both linear and angular velocities for proper compensation
-            base_lin_vel = -base_state['linear_velocity'][:3]    # Negative for position compensation
-            base_ang_vel = -base_state['angular_velocity']       # Negative for orientation compensation
-            
-            pos_error = pos_vel + base_lin_vel
-            ori_error = ori_vel + base_ang_vel
-            
-            # Stricter bounds for orientation
-            pos_bounds = 0.005 * np.ones(3)  # 5mm position error
-            ori_bounds = 0.005 * np.ones(3)  # ~0.3 degrees orientation error
-            
-            return np.concatenate([
-                pos_bounds - np.abs(pos_error),
-                ori_bounds - np.abs(ori_error)
-            ])
-        
-        # Add EE motion constraint
         constraints.append({
             'type': 'ineq',
-            'fun': ee_motion_constraint
+            'fun': dynamics_constraint
         })
         
         return constraints
 
+    def _get_bounds(self, x0: np.ndarray) -> List[Tuple[float, float]]:
+        """Get bounds for optimization variables"""
+        bounds = []
+        
+        # Apply velocity bounds for each timestep
+        vel_limits = list(self.dynamics.joint_vel_limits.values())
+        for _ in range(self.horizon):
+            for j in range(self.dynamics.n_controls):
+                bounds.append((-vel_limits[j], vel_limits[j]))
+                
+        return bounds
+
     def _transform_base_motion(self, base_state: Dict) -> Dict:
-        """Transform base motion from mobile base frame to arm base frame"""
+        """Transform base motion from mobile base frame to arm base frame
+        
+        Args:
+            base_state: Base state including velocities and pose
+            
+        Returns:
+            Transformed state in arm base frame
+            
+        Raises:
+            ValueError: If input velocities contain invalid values
+        """
+        # Validate inputs
+        for key in ['linear_velocity', 'angular_velocity', 'position', 'orientation']:
+            if key not in base_state:
+                raise ValueError(f"Missing required key: {key}")
+            if not all(np.isfinite(base_state[key])):
+                raise ValueError(f"Invalid values in {key}")
+        
         # Get platform velocities
         platform_vel = base_state['linear_velocity']
         platform_ang_vel = base_state['angular_velocity']
@@ -308,56 +350,128 @@ class URMPC:
         omega = platform_ang_vel[2]  # positive is counter-clockwise
         
         # Calculate tangential velocity for counter-rotation
-        # When platform rotates clockwise (negative omega):
-        # The end-effector should move in the opposite direction in world frame
-        tangential_vel = -np.array([
-            omega * offset[1],     # Changed sign: -ω * y
-            -omega * offset[0],    # Changed sign: ω * x
+        tangential_vel = np.array([
+            -omega * offset[1],     # -ω * y
+            omega * offset[0],      # ω * x
             0.0
         ])
         
-        # Platform linear velocity compensation
-        platform_comp_vel = platform_vel
-        
-        # Total velocity combines both compensations
-        total_vel = platform_comp_vel + tangential_vel
-        
-        # Debug information
-        rospy.loginfo("=== Motion Transform Debug ===")
-        rospy.loginfo(f"Platform angular velocity: {platform_ang_vel}")
-        rospy.loginfo(f"Offset from rotation center: {offset}")
-        rospy.loginfo(f"Calculated tangential velocity: {tangential_vel}")
-        rospy.loginfo(f"Total compensation velocity: {total_vel}")
-        rospy.loginfo("============================")
+        # Total velocity combines both linear and tangential components
+        total_vel = platform_vel + tangential_vel
         
         transformed_state = base_state.copy()
         transformed_state['linear_velocity'] = total_vel
         transformed_state['position'] = base_state['position'] + offset
-        transformed_state['angular_velocity'] = platform_ang_vel  # Keep for orientation compensation
+        transformed_state['angular_velocity'] = platform_ang_vel
+        
+        # Debug information
+        rospy.loginfo("=== Motion Transform Debug ===")
+        rospy.loginfo(f"Platform velocity: {platform_vel}")
+        rospy.loginfo(f"Platform angular velocity: {platform_ang_vel}")
+        rospy.loginfo(f"Offset from rotation center: {offset}")
+        rospy.loginfo(f"Tangential velocity: {tangential_vel}")
+        rospy.loginfo(f"Total compensation velocity: {total_vel}")
+        rospy.loginfo("============================")
         
         return transformed_state
 
-    def _get_jacobian(self, joint_positions: np.ndarray) -> np.ndarray:
-        """Get the Jacobian matrix for the current configuration"""
-        try:
-            # Ensure joint_positions is a list (not numpy array)
-            if isinstance(joint_positions, np.ndarray):
-                joint_positions = joint_positions.tolist()
+    def predict_base_motion(self, current_base_state: Dict, horizon: int) -> List[Dict]:
+        """Predict base motion over horizon with filtered acceleration estimation
+        
+        Args:
+            current_base_state: Current base state including position, orientation, velocities
+            horizon: Number of timesteps to predict
             
-            # Get Jacobian directly using joint positions
-            J = self.move_group.get_jacobian_matrix(joint_positions)
+        Returns:
+            List of predicted base states over horizon
+        """
+        base_trajectory = []
+        dt = self.dt
+        
+        # Estimate acceleration with filtering
+        if hasattr(self, 'prev_base_vel'):
+            raw_accel = (current_base_state['linear_velocity'] - self.prev_base_vel) / dt
+            if hasattr(self, 'prev_accel'):
+                alpha = 0.7  # Filter coefficient
+                base_accel = alpha * raw_accel + (1 - alpha) * self.prev_accel
+            else:
+                base_accel = raw_accel
+            self.prev_accel = base_accel.copy()
+        else:
+            base_accel = np.zeros(3)
+        
+        self.prev_base_vel = current_base_state['linear_velocity'].copy()
+        
+        for k in range(horizon):
+            # Predict velocity using acceleration
+            predicted_vel = current_base_state['linear_velocity'] + k * dt * base_accel
             
-            # Convert to numpy array and ensure correct shape (6x6)
-            J = np.array(J)
-            if J.shape != (6, 6):
-                rospy.logwarn(f"Unexpected Jacobian shape: {J.shape}, using fallback")
-                return np.eye(6)
-                
-            return J
+            # Predict position using updated velocity
+            predicted_pos = (current_base_state['position'] + 
+                            k * dt * current_base_state['linear_velocity'] +
+                            0.5 * k * dt**2 * base_accel)
             
-        except Exception as e:
-            rospy.logerr(f"Failed to get Jacobian: {str(e)}")
-            return np.eye(6)
+            # Predict orientation (could be improved with angular acceleration)
+            predicted_ori = (current_base_state['orientation'] + 
+                            k * dt * current_base_state['angular_velocity'])
+            
+            predicted_state = {
+                'position': predicted_pos.copy(),
+                'orientation': predicted_ori.copy(),
+                'linear_velocity': predicted_vel.copy(),
+                'angular_velocity': current_base_state['angular_velocity'].copy()
+            }
+            
+            base_trajectory.append(predicted_state)
+        
+        return base_trajectory
+
+    def _cost_function(self, x: np.ndarray, current_state: np.ndarray, 
+                      target_ee_pose: Dict, base_trajectory: List[Dict]) -> float:
+        """True MPC cost function evaluating the entire trajectory"""
+        # Reshape control sequence
+        control_sequence = x.reshape(self.horizon, self.dynamics.n_controls)
+        
+        # Initialize cost and state
+        total_cost = 0.0
+        x_current = current_state.copy()
+        
+        # Evaluate cost over the entire horizon
+        for k in range(self.horizon):
+            # Get control input and predicted base state for current stage
+            u_k = control_sequence[k]
+            base_k = base_trajectory[k]
+            
+            # Add stage cost
+            stage_cost = self.calculate_stage_cost(x_current, target_ee_pose, base_k, u_k, k)
+            total_cost += stage_cost
+            
+            # Predict next state using dynamics model
+            x_current = self.dynamics.predict_next_state(x_current, u_k)
+        
+        # Add terminal cost
+        terminal_cost = self.calculate_terminal_cost(x_current, target_ee_pose, base_trajectory[-1])
+        total_cost += terminal_cost
+        
+        return total_cost
+
+    def predict_trajectory(self, initial_state: np.ndarray, 
+                          control_sequence: np.ndarray, 
+                          horizon: int) -> List[np.ndarray]:
+        """Predict state trajectory over horizon"""
+        trajectory = [initial_state]
+        current_state = initial_state.copy()
+        
+        for k in range(horizon):
+            next_state = self.dynamics.predict_next_state(
+                current_state,
+                control_sequence[k],
+                self.dt
+            )
+            trajectory.append(next_state)
+            current_state = next_state
+        
+        return trajectory
 
 def main():
     """Test the MPC controller"""
