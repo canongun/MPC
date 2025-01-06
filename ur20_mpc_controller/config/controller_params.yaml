@@ -3,20 +3,20 @@ mpc_controller:
   sim: False
 
   # MPC Parameters
-  horizon: 3
-  dt: 0.05
+  horizon: 1
+  dt: 0.1
   
   # Cost Function Weights
   weights:
-    position: 3.0
-    orientation: 2.0
-    control: 0.005
-    smooth: 0.02
+    position: 5.0
+    orientation: 3.0
+    control: 0.03
+    smooth: 0.08
   
   # Active Motion Weights
   active_weights:
-    linear: 50.0
-    angular: 5.0
+    linear: 80.0
+    angular: 8.0
   
   # Robot Configuration
   arm_base_offset:
