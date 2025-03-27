@@ -20,7 +20,7 @@ mpc_controller:
   
   # Robot Configuration
   arm_base_offset:
-    x: 0.06
+    x: 0.2
     y: -0.1
     z: 0.09
     yaw: 3.14159  # pi radians
