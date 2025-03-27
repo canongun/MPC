@@ -3,10 +3,8 @@
 import rospy
 import numpy as np
 from scipy.optimize import minimize
-import moveit_commander
 from typing import Dict, Tuple, List
 
-from ur20_mpc_controller.models.base_estimator import BaseMotionEstimator
 from ur20_mpc_controller.models.ur20_dynamics import UR20Dynamics
 
 class OptimizationError(Exception):
@@ -23,10 +21,6 @@ class URMPC:
         - ee_position (3): End-effector position in world frame
         - ee_orientation (3): End-effector orientation in euler angles
         """
-        # Initialize ROS node
-        moveit_commander.roscpp_initialize([])
-        self.robot = moveit_commander.RobotCommander()
-        self.move_group = moveit_commander.MoveGroupCommander("arm")
         
         # Initialize dynamics model
         self.dynamics: UR20Dynamics = UR20Dynamics()
@@ -56,10 +50,9 @@ class URMPC:
             'x': rospy.get_param('~mpc_controller/arm_base_offset/x', 0.06),
             'y': rospy.get_param('~mpc_controller/arm_base_offset/y', -0.1),
             'z': rospy.get_param('~mpc_controller/arm_base_offset/z', 0.09),
-            'yaw': rospy.get_param('~mpc_controller/arm_base_offset/yaw', np.pi)
+            'yaw': rospy.get_param('~mpc_controller/arm_base_offset/yaw', 0.0)
         }
         
-        self.base_estimator = BaseMotionEstimator()
         self.previous_solution = None
         
         # Add damping weight
@@ -91,14 +84,14 @@ class URMPC:
             base_ang_mag = np.linalg.norm(base_state['angular_velocity'])
             
             # Debug prints
-            rospy.loginfo(f"Base linear velocity magnitude: {base_vel_mag}")
-            rospy.loginfo(f"Base angular velocity magnitude: {base_ang_mag}")
+            # rospy.loginfo(f"Base linear velocity magnitude: {base_vel_mag}")
+            # rospy.loginfo(f"Base angular velocity magnitude: {base_ang_mag}")
             
-            if base_vel_mag < 0.01 and base_ang_mag < 0.01:
+            if base_vel_mag < 0.01 and base_ang_mag < 0.003:  # Reduced threshold for rotation
                 return np.zeros(self.dynamics.n_controls)
 
-            # Transform base motion to arm base frame
-            transformed_base_state = self._transform_base_motion(base_state)
+            # Transform base motion to arm base frame, including end-effector position
+            transformed_base_state = self._transform_base_motion(base_state, current_ee_pose)
             
             # Get current state vector
             current_state = self.dynamics.get_state_vector(
@@ -114,9 +107,19 @@ class URMPC:
             J_pos = J[:3, :]
             J_ori = J[3:, :]
             
+            # Debug the angular velocity handling
+            # rospy.loginfo(f"Raw angular velocity: {base_state['angular_velocity']}")
+            # rospy.loginfo(f"Transformed angular velocity: {transformed_base_state['angular_velocity']}")
+     
+            # For rotational compensation, compute the end-effector displacement
+            # caused by platform rotation about world origin
+            base_linear_vel = transformed_base_state['linear_velocity']
+            base_angular_vel = transformed_base_state['angular_velocity']
+            
             # Compute required velocities for both position and orientation
-            base_lin_vel = -transformed_base_state['linear_velocity'][:3]
-            base_ang_vel = -transformed_base_state['angular_velocity']
+            # Negative sign is crucial for compensation
+            base_lin_vel = -base_linear_vel
+            base_ang_vel = -base_angular_vel
             
             # Combine into full velocity vector
             J_full = np.vstack([J_pos, J_ori])
@@ -176,11 +179,11 @@ class URMPC:
             ee_vel = J_pos @ control
             ee_ang_vel = J_ori @ control
             
-            rospy.loginfo(f"Base linear velocity: {base_state['linear_velocity']}")
-            rospy.loginfo(f"Base angular velocity: {base_state['angular_velocity']}")
-            rospy.loginfo(f"EE linear velocity: {ee_vel}")
-            rospy.loginfo(f"EE angular velocity: {ee_ang_vel}")
-            rospy.loginfo(f"Predicted final EE error: {predicted_trajectory[-1][2*self.dynamics.n_q:2*self.dynamics.n_q + 3] - target_ee_pose['position']}")
+            # rospy.loginfo(f"Base linear velocity: {base_state['linear_velocity']}")
+            # rospy.loginfo(f"Base angular velocity: {base_state['angular_velocity']}")
+            # rospy.loginfo(f"EE linear velocity: {ee_vel}")
+            # rospy.loginfo(f"EE angular velocity: {ee_ang_vel}")
+            # rospy.loginfo(f"Predicted final EE error: {predicted_trajectory[-1][2*self.dynamics.n_q:2*self.dynamics.n_q + 3] - target_ee_pose['position']}")
             
             return control
             
@@ -235,6 +238,11 @@ class URMPC:
         
         # Control regularization
         control_cost = self.w_control * np.sum(control**2)
+        
+        # rospy.loginfo(f"Joint positions: {q}")
+        # rospy.loginfo(f"End-effector velocity: Linear={ee_lin_vel}, Angular={ee_ang_vel}")
+        # rospy.loginfo(f"Base velocity: Linear={base_lin_vel}, Angular={base_ang_vel}")
+        # rospy.loginfo(f"Velocity error: Linear={lin_vel_error}, Angular={ang_vel_error}")
         
         return lin_vel_cost + ang_vel_cost + pos_cost + ori_cost + control_cost
 
@@ -316,18 +324,8 @@ class URMPC:
                 
         return bounds
 
-    def _transform_base_motion(self, base_state: Dict) -> Dict:
-        """Transform base motion from mobile base frame to arm base frame
-        
-        Args:
-            base_state: Base state including velocities and pose
-            
-        Returns:
-            Transformed state in arm base frame
-            
-        Raises:
-            ValueError: If input velocities contain invalid values
-        """
+    def _transform_base_motion(self, base_state: Dict, current_ee_pose: Dict = None) -> Dict:
+        """Transform base motion from mobile base frame to arm base frame"""
         # Validate inputs
         for key in ['linear_velocity', 'angular_velocity', 'position', 'orientation']:
             if key not in base_state:
@@ -339,39 +337,78 @@ class URMPC:
         platform_vel = base_state['linear_velocity']
         platform_ang_vel = base_state['angular_velocity']
         
-        # Get offset vector from rotation center to arm base
-        offset = np.array([
-            self.arm_base_offset['x'],
-            self.arm_base_offset['y'],
-            self.arm_base_offset['z']
+        # Get arm base offset vector from rotation center
+        arm_offset = np.array([
+            self.arm_base_offset['x'],  # x - From TF tree
+            self.arm_base_offset['y'],  # y - From TF tree
+            self.arm_base_offset['z']   # z - From TF tree
         ])
         
-        # For rotation around z-axis
-        omega = platform_ang_vel[2]  # positive is counter-clockwise
+        # Get the rotation between platform and arm base
+        yaw = self.arm_base_offset['yaw']
+        rotation_matrix = np.array([
+            [np.cos(yaw), -np.sin(yaw), 0],
+            [np.sin(yaw), np.cos(yaw), 0],
+            [0, 0, 1]
+        ])
         
-        # Calculate tangential velocity for counter-rotation
-        tangential_vel = np.array([
-            -omega * offset[1],     # -ω * y
-            omega * offset[0],      # ω * x
+        # Transform platform velocity to arm base frame
+        platform_vel_arm_frame = rotation_matrix @ platform_vel
+        platform_ang_vel_arm_frame = rotation_matrix @ platform_ang_vel
+        
+        # For rotation around z-axis
+        omega = platform_ang_vel_arm_frame[2]  # positive is counter-clockwise
+        
+        # Calculate tangential velocity at arm base
+        arm_tangential_vel = np.array([
+            -omega * arm_offset[1],     # -ω * y
+            omega * arm_offset[0],      # ω * x
             0.0
         ])
         
-        # Total velocity combines both linear and tangential components
-        total_vel = platform_vel + tangential_vel
+        # If end-effector pose is provided, calculate tangential velocity at end-effector
+        if current_ee_pose is not None:
+            # Get vector from rotation center to end-effector
+            # This is platform position + arm_offset + vector from arm base to end-effector
+            ee_pos_world = current_ee_pose['position']
+            platform_pos = base_state['position']
+            
+            # Calculate the vector from platform center to end-effector
+            platform_to_ee = ee_pos_world - platform_pos
+            
+            # Calculate tangential velocity at end-effector position
+            ee_tangential_vel = np.array([
+                -omega * platform_to_ee[1],  # -ω * y
+                omega * platform_to_ee[0],   # ω * x
+                0.0
+            ])
+            
+            # Total velocity is linear + end-effector tangential
+            total_vel = platform_vel_arm_frame + ee_tangential_vel
+            
+            # rospy.loginfo(f"EE position: {ee_pos_world}")
+            # rospy.loginfo(f"Platform position: {platform_pos}")
+            # rospy.loginfo(f"Platform to EE vector: {platform_to_ee}")
+            # rospy.loginfo(f"EE tangential velocity: {ee_tangential_vel}")
+        else:
+            # Fall back to arm base calculation if EE pose not provided
+            total_vel = platform_vel_arm_frame + arm_tangential_vel
         
         transformed_state = base_state.copy()
         transformed_state['linear_velocity'] = total_vel
-        transformed_state['position'] = base_state['position'] + offset
-        transformed_state['angular_velocity'] = platform_ang_vel
+        transformed_state['position'] = base_state['position'] + arm_offset
+        transformed_state['angular_velocity'] = platform_ang_vel_arm_frame
         
-        # Debug information
-        rospy.loginfo("=== Motion Transform Debug ===")
-        rospy.loginfo(f"Platform velocity: {platform_vel}")
-        rospy.loginfo(f"Platform angular velocity: {platform_ang_vel}")
-        rospy.loginfo(f"Offset from rotation center: {offset}")
-        rospy.loginfo(f"Tangential velocity: {tangential_vel}")
-        rospy.loginfo(f"Total compensation velocity: {total_vel}")
-        rospy.loginfo("============================")
+        # # Debug information - make more concise
+        # rospy.loginfo("=== Motion Transform ===")
+        # rospy.loginfo(f"Angular velocity (ω): {omega}")
+        
+        # if current_ee_pose is not None:
+        #     rospy.loginfo(f"Platform→EE vector: [{platform_to_ee[0]:.3f}, {platform_to_ee[1]:.3f}, {platform_to_ee[2]:.3f}]")
+        #     rospy.loginfo(f"EE tangential velocity: [{ee_tangential_vel[0]:.4f}, {ee_tangential_vel[1]:.4f}, {ee_tangential_vel[2]:.4f}]")
+        
+        # rospy.loginfo(f"Total velocity: [{total_vel[0]:.4f}, {total_vel[1]:.4f}, {total_vel[2]:.4f}]")
+        # rospy.loginfo("=====================")
         
         return transformed_state
 

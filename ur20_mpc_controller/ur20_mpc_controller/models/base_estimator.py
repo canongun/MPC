@@ -8,7 +8,7 @@ class BaseMotionEstimator:
         self.history_size = 10
         self.position_history = []
         self.velocity_history = []
-        self.dt = 0.1  # 10Hz
+        self.dt = rospy.get_param('~mpc_controller/dt', 0.05)
         
     def update(self, current_base_state: Dict) -> Dict:
         """Update estimator with new base state measurement"""
@@ -27,9 +27,9 @@ class BaseMotionEstimator:
         # Return state with all required fields
         return {
             'position': current_base_state['position'],
-            'orientation': np.zeros(3),  # Not used in current implementation
+            'orientation': current_base_state['orientation'],  # Pass through
             'linear_velocity': self._estimate_velocity(),
-            'angular_velocity': np.zeros(3)  # Not used in current implementation
+            'angular_velocity': current_base_state['angular_velocity']  # Pass through
         }
     
     def _estimate_velocity(self) -> np.ndarray:
