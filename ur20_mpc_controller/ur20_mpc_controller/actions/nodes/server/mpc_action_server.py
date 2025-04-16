@@ -52,7 +52,6 @@ class MPCActionServer:
         
     def execute_cb(self, goal):
         rate = rospy.Rate(1.0/self.mpc.dt)  # Use configured dt
-        print("XXXXXXXXXXX", self.mpc.dt)
 
         # Get initial poses and joint positions
         initial_pose = self.move_group.get_current_pose(
