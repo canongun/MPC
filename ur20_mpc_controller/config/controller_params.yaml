@@ -3,24 +3,27 @@ mpc_controller:
   sim: False
 
   # MPC Parameters
-  horizon: 1
+  horizon: 10
   dt: 0.1
   
   # Cost Function Weights
   weights:
     position: 5.0
     orientation: 3.0
-    control: 0.03
-    smooth: 0.08
+    control: 0.1
+    smooth: 0.3
+    damping: 2.0
   
   # Active Motion Weights
   active_weights:
-    linear: 50.0
-    angular: 50.0
+    linear: 20.0
+    angular: 5.0
   
   # Robot Configuration
   arm_base_offset:
     x: 0.0
     y: 0.1
+    # x: 0.03081
+    # y: -0.0890
     z: 0.5
-    yaw: 0.0  # No rotation according to your TF data
+    yaw: 0.0
