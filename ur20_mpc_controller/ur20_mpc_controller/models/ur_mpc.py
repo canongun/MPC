@@ -26,8 +26,8 @@ class URMPC:
         self.dynamics: UR20Dynamics = UR20Dynamics()
         
         # Load parameters from config
-        self.horizon: int = rospy.get_param('~mpc_controller/horizon', 3)  # Match config default
-        self.dt: float = rospy.get_param('~mpc_controller/dt', 0.05)
+        self.horizon: int = rospy.get_param('~mpc_controller/horizon', 10)  # Match config default
+        self.dt: float = rospy.get_param('~mpc_controller/dt', 0.1)
         
         # Add parameter validation
         if self.horizon <= 0:
@@ -83,16 +83,40 @@ class URMPC:
             base_vel_mag = np.linalg.norm(base_state['linear_velocity'])
             base_ang_mag = np.linalg.norm(base_state['angular_velocity'])
             
-            # Debug prints
-            # rospy.loginfo(f"Base linear velocity magnitude: {base_vel_mag}")
-            # rospy.loginfo(f"Base angular velocity magnitude: {base_ang_mag}")
-            
-            if base_vel_mag < 0.01 and base_ang_mag < 0.003:  # Reduced threshold for rotation
+            if base_vel_mag < 0.01 and base_ang_mag < 0.01:
                 return np.zeros(self.dynamics.n_controls)
 
-            # Transform base motion to arm base frame, including end-effector position
-            transformed_base_state = self._transform_base_motion(base_state, current_ee_pose)
+            # 1. Get relevant states in world frame
+            platform_pos_w = base_state['position']
+            platform_lin_vel_w = base_state['linear_velocity']
+            platform_ang_vel_w = base_state['angular_velocity']
+            ee_pos_w = current_ee_pose['position']
+
+            # 2. Calculate vector from platform center to EE (world frame)
+            r_p_to_ee_w = ee_pos_w - platform_pos_w
+
+            # 3. Calculate velocity induced at EE by platform rotation (world frame)
+            # Use np.cross for general 3D rotation
+            omega_p_w = base_state['angular_velocity']
+            r_p_to_ee_w = current_ee_pose['position'] - base_state['position']
+            # If only Z rotation is significant:
+            # v_ee_rot_w = np.array([
+            #     -omega_p_w[2] * r_p_to_ee_w[1], 
+            #      omega_p_w[2] * r_p_to_ee_w[0], 
+            #      0.0 
+            # ])
+            # For full 3D rotation:
+            v_ee_rot_w = np.cross(omega_p_w, r_p_to_ee_w)
+
+            # 4. Calculate total velocity induced at EE (world frame)
+            v_induced_ee_w = platform_lin_vel_w + v_ee_rot_w
+
+            # 5. Calculate target compensation velocities (world frame)
+            target_lin_vel_w = -v_induced_ee_w
+            target_ang_vel_w = -platform_ang_vel_w 
             
+            rospy.logdebug(f"Target Compensation Velocity (World): Linear={target_lin_vel_w}, Angular={target_ang_vel_w}")
+
             # Get current state vector
             current_state = self.dynamics.get_state_vector(
                 current_joint_state, 
@@ -100,7 +124,7 @@ class URMPC:
             )
             
             # Predict base motion over horizon
-            base_trajectory = self.predict_base_motion(transformed_base_state, self.horizon)
+            base_trajectory = self.predict_base_motion(base_state, self.horizon)
             
             # Get initial guess using Jacobian
             J = self.dynamics.get_jacobian(current_joint_state['position'])
@@ -111,19 +135,9 @@ class URMPC:
             # rospy.loginfo(f"Raw angular velocity: {base_state['angular_velocity']}")
             # rospy.loginfo(f"Transformed angular velocity: {transformed_base_state['angular_velocity']}")
      
-            # For rotational compensation, compute the end-effector displacement
-            # caused by platform rotation about world origin
-            base_linear_vel = transformed_base_state['linear_velocity']
-            base_angular_vel = transformed_base_state['angular_velocity']
-            
-            # Compute required velocities for both position and orientation
-            # Negative sign is crucial for compensation
-            base_lin_vel = -base_linear_vel
-            base_ang_vel = -base_angular_vel
-            
             # Combine into full velocity vector
             J_full = np.vstack([J_pos, J_ori])
-            base_vel_full = np.concatenate([base_lin_vel, base_ang_vel])
+            base_vel_full = np.concatenate([target_lin_vel_w, target_ang_vel_w])
             
             # Compute initial velocities using damped least squares
             lambda_ = 0.01
@@ -163,8 +177,9 @@ class URMPC:
             
             # Add control smoothing
             if hasattr(self, 'previous_control'):
-                alpha = 0.7  # Smoothing factor (0.7 means 70% new, 30% old)
-                control = alpha * control + (1 - alpha) * self.previous_control
+                # Use stronger filtering (0.5 means 50% new, 50% old)
+                alpha_output = 0.5
+                control = alpha_output * control + (1.0 - alpha_output) * self.previous_control
             
             # Store for next iteration
             self.previous_control = control.copy()
@@ -184,6 +199,10 @@ class URMPC:
             # rospy.loginfo(f"EE linear velocity: {ee_vel}")
             # rospy.loginfo(f"EE angular velocity: {ee_ang_vel}")
             # rospy.loginfo(f"Predicted final EE error: {predicted_trajectory[-1][2*self.dynamics.n_q:2*self.dynamics.n_q + 3] - target_ee_pose['position']}")
+            
+            # Add velocity sanity check to prevent extreme commands
+            max_joint_vel = 0.5  # rad/s
+            control = np.clip(control, -max_joint_vel, max_joint_vel)
             
             return control
             
@@ -228,23 +247,42 @@ class URMPC:
         # Compute costs with time-varying weights
         decay = 0.95**k  # Weight decay over horizon
         
+        # Modify the weights for angular motion to prioritize position stability during rotation
+        if np.linalg.norm(base_state['angular_velocity']) > 0.02:  # If significant rotation
+            # During rotation, emphasize position compensation more
+            rot_priority_factor = 2.0
+            lin_vel_cost = self.w_linear * rot_priority_factor * decay * np.sum(lin_vel_error**2)
+        else:
+            # Normal weighting for non-rotational motion
+            lin_vel_cost = self.w_linear * decay * np.sum(lin_vel_error**2)
+        
         # Primary objectives (velocity matching)
-        lin_vel_cost = self.w_linear * decay * np.sum(lin_vel_error**2)
         ang_vel_cost = self.w_angular * decay * np.sum(ang_vel_error**2)
         
         # Secondary objectives (position and orientation holding)
         pos_cost = self.w_position * decay * np.sum(pos_error**2)
         ori_cost = self.w_orientation * decay * np.sum(ori_error**2)
         
-        # Control regularization
+        # Control regularization 
         control_cost = self.w_control * np.sum(control**2)
+        
+        # Add damping cost to penalize high velocity changes
+        if k > 0 and hasattr(self, 'previous_control'):
+            damping_cost = self.w_damping * np.sum((control - self.previous_control)**2)
+        else:
+            damping_cost = 0.0
+        
+        # Add smoothness cost for sequential control inputs if horizon > 1
+        smooth_cost = 0.0
+        if k > 0 and self.horizon > 1:
+            smooth_cost = self.w_smooth * np.sum(control**2)
         
         # rospy.loginfo(f"Joint positions: {q}")
         # rospy.loginfo(f"End-effector velocity: Linear={ee_lin_vel}, Angular={ee_ang_vel}")
         # rospy.loginfo(f"Base velocity: Linear={base_lin_vel}, Angular={base_ang_vel}")
         # rospy.loginfo(f"Velocity error: Linear={lin_vel_error}, Angular={ang_vel_error}")
         
-        return lin_vel_cost + ang_vel_cost + pos_cost + ori_cost + control_cost
+        return lin_vel_cost + ang_vel_cost + pos_cost + ori_cost + control_cost + damping_cost + smooth_cost
 
     def calculate_terminal_cost(self, final_state, target_ee_pose, final_base_state):
         """Calculate terminal cost for both position and orientation"""
@@ -366,10 +404,22 @@ class URMPC:
             0.0
         ])
         
-        # If end-effector pose is provided, calculate tangential velocity at end-effector
+        # Get platform's current orientation in world frame
+        platform_yaw = base_state['orientation'][2]  # Extract yaw
+        
+        # Create rotation matrix for platform's current orientation
+        world_rotation = np.array([
+            [np.cos(platform_yaw), -np.sin(platform_yaw), 0],
+            [np.sin(platform_yaw), np.cos(platform_yaw), 0],
+            [0, 0, 1]
+        ])
+        
+        # Apply world rotation to the arm offset vector
+        rotated_arm_offset = world_rotation @ arm_offset
+        
+        # Calculate end-effector tangential velocity if pose is provided
         if current_ee_pose is not None:
             # Get vector from rotation center to end-effector
-            # This is platform position + arm_offset + vector from arm base to end-effector
             ee_pos_world = current_ee_pose['position']
             platform_pos = base_state['position']
             
@@ -378,37 +428,30 @@ class URMPC:
             
             # Calculate tangential velocity at end-effector position
             ee_tangential_vel = np.array([
-                -omega * platform_to_ee[1],  # -ω * y
-                omega * platform_to_ee[0],   # ω * x
+                omega * platform_to_ee[1],   # ω * y
+                -omega * platform_to_ee[0],  # -ω * x
                 0.0
             ])
             
             # Total velocity is linear + end-effector tangential
             total_vel = platform_vel_arm_frame + ee_tangential_vel
             
-            # rospy.loginfo(f"EE position: {ee_pos_world}")
-            # rospy.loginfo(f"Platform position: {platform_pos}")
-            # rospy.loginfo(f"Platform to EE vector: {platform_to_ee}")
-            # rospy.loginfo(f"EE tangential velocity: {ee_tangential_vel}")
+            transformed_state = base_state.copy()
+            transformed_state['linear_velocity'] = total_vel
         else:
             # Fall back to arm base calculation if EE pose not provided
-            total_vel = platform_vel_arm_frame + arm_tangential_vel
+            arm_tangential_vel = np.array([
+                -omega * arm_offset[1],     # -ω * y
+                omega * arm_offset[0],      # ω * x
+                0.0
+            ])
+            
+            transformed_state = base_state.copy()
+            transformed_state['linear_velocity'] = platform_vel_arm_frame + arm_tangential_vel
         
-        transformed_state = base_state.copy()
-        transformed_state['linear_velocity'] = total_vel
-        transformed_state['position'] = base_state['position'] + arm_offset
+        # These settings are common for both cases
+        transformed_state['position'] = base_state['position'] + rotated_arm_offset
         transformed_state['angular_velocity'] = platform_ang_vel_arm_frame
-        
-        # # Debug information - make more concise
-        # rospy.loginfo("=== Motion Transform ===")
-        # rospy.loginfo(f"Angular velocity (ω): {omega}")
-        
-        # if current_ee_pose is not None:
-        #     rospy.loginfo(f"Platform→EE vector: [{platform_to_ee[0]:.3f}, {platform_to_ee[1]:.3f}, {platform_to_ee[2]:.3f}]")
-        #     rospy.loginfo(f"EE tangential velocity: [{ee_tangential_vel[0]:.4f}, {ee_tangential_vel[1]:.4f}, {ee_tangential_vel[2]:.4f}]")
-        
-        # rospy.loginfo(f"Total velocity: [{total_vel[0]:.4f}, {total_vel[1]:.4f}, {total_vel[2]:.4f}]")
-        # rospy.loginfo("=====================")
         
         return transformed_state
 
@@ -428,35 +471,69 @@ class URMPC:
         # Estimate acceleration with filtering
         if hasattr(self, 'prev_base_vel'):
             raw_accel = (current_base_state['linear_velocity'] - self.prev_base_vel) / dt
+            
+            # Apply stronger low-pass filtering on acceleration
             if hasattr(self, 'prev_accel'):
-                alpha = 0.7  # Filter coefficient
+                # More aggressive filtering (0.5 means 50% new, 50% previous)
+                alpha = 0.5  # Reduced from 0.7 for stronger filtering
                 base_accel = alpha * raw_accel + (1 - alpha) * self.prev_accel
+                
+                # Add acceleration limiting
+                accel_limit = 0.5  # m/s²
+                base_accel = np.clip(base_accel, -accel_limit, accel_limit)
             else:
-                base_accel = raw_accel
+                # First-time initialization
+                base_accel = raw_accel * 0.5  # Conservative initial estimate
+            
             self.prev_accel = base_accel.copy()
         else:
             base_accel = np.zeros(3)
         
         self.prev_base_vel = current_base_state['linear_velocity'].copy()
         
+        # Similarly filter angular acceleration
+        if hasattr(self, 'prev_base_ang_vel'):
+            raw_ang_accel = (current_base_state['angular_velocity'] - self.prev_base_ang_vel) / dt
+            
+            if hasattr(self, 'prev_ang_accel'):
+                alpha_ang = 0.5
+                ang_accel = alpha_ang * raw_ang_accel + (1 - alpha_ang) * self.prev_ang_accel
+                
+                # Add angular acceleration limiting
+                ang_accel_limit = 0.3  # rad/s²
+                ang_accel = np.clip(ang_accel, -ang_accel_limit, ang_accel_limit)
+            else:
+                ang_accel = raw_ang_accel * 0.5
+                
+            self.prev_ang_accel = ang_accel.copy()
+        else:
+            ang_accel = np.zeros(3)
+            
+        self.prev_base_ang_vel = current_base_state['angular_velocity'].copy()
+        
         for k in range(horizon):
-            # Predict velocity using acceleration
-            predicted_vel = current_base_state['linear_velocity'] + k * dt * base_accel
+            # Predict velocity using acceleration with decay factor
+            decay = min(1.0, max(0.3, 1.0 - 0.2*k))  # Decay acceleration impact over time
+            predicted_vel = current_base_state['linear_velocity'] + k * dt * base_accel * decay
+            
+            # Predict angular velocity with decay factor for stability
+            predicted_ang_vel = current_base_state['angular_velocity'] + k * dt * ang_accel * decay
             
             # Predict position using updated velocity
             predicted_pos = (current_base_state['position'] + 
                             k * dt * current_base_state['linear_velocity'] +
-                            0.5 * k * dt**2 * base_accel)
+                            0.5 * k * dt**2 * base_accel * decay)
             
-            # Predict orientation (could be improved with angular acceleration)
+            # Predict orientation
             predicted_ori = (current_base_state['orientation'] + 
-                            k * dt * current_base_state['angular_velocity'])
+                            k * dt * current_base_state['angular_velocity'] +
+                            0.5 * k * dt**2 * ang_accel * decay)
             
             predicted_state = {
                 'position': predicted_pos.copy(),
                 'orientation': predicted_ori.copy(),
                 'linear_velocity': predicted_vel.copy(),
-                'angular_velocity': current_base_state['angular_velocity'].copy()
+                'angular_velocity': predicted_ang_vel.copy()
             }
             
             base_trajectory.append(predicted_state)
