@@ -92,4 +92,26 @@
   <xacro:mpc prefix="$(arg prefix)" load_kinematics_file="$(arg load_kinematics_file)"/>
   <xacro:ros_control/>
 
+  <!-- Add Gazebo plugin to publish ground truth odometry for mobile_base_link -->
+  <gazebo>
+    <plugin name="gazebo_ros_p3d" filename="libgazebo_ros_p3d.so">
+      <!-- Frame specification -->
+      <frameName>world</frameName>             <!-- The reference frame (world exists in Gazebo) -->
+      <bodyName>mobile_base_link</bodyName>   <!-- The link whose pose/velocity we want -->
+      
+      <!-- Topic to publish on -->
+      <topicName>/mobile_base/odom</topicName> <!-- Target topic name -->
+      
+      <!-- Update rate -->
+      <updateRate>30.0</updateRate>            <!-- Publishing frequency (Hz) -->
+      
+      <!-- Optional: Noise can be added, but usually 0 for ground truth -->
+      <gaussianNoise>0.0</gaussianNoise>
+      
+      <!-- Initial offset (if needed, usually 0) -->
+      <xyzOffset>0 0 0</xyzOffset>
+      <rpyOffset>0 0 0</rpyOffset>
+    </plugin>
+  </gazebo>
+
 </robot>
