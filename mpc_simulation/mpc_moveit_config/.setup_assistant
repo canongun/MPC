@@ -1,0 +1,11 @@
+moveit_setup_assistant_config:
+  URDF:
+    package: mpc_description
+    relative_path: urdf/mpc_robot.xacro
+    xacro_args: ""
+  SRDF:
+    relative_path: config/mpc.srdf
+  CONFIG:
+    author_name: can
+    author_email: can@asas.com
+    generated_timestamp: 1744895522

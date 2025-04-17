@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<robot name="mpc" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  
+  <!-- UR20 Robot Arm -->
+  <xacro:include filename="$(find ur_description)/urdf/inc/ur20_macro.xacro" />  
+
+  <!-- Adapter Plate -->
+  <xacro:include filename="$(find adapter_plate_description)/urdf/adapter_plate_description.urdf.xacro" /> 
+
+  <!-- Cobot e30 Gripper -->
+  <xacro:include filename="$(find cobotsmartgripe30_angled_description)/urdf/cobotsmartgripe30_angled.urdf.xacro" />  
+
+  <!-- ROS plug-ins -->
+  <xacro:include filename="$(find mpc_description)/urdf/ROS/ros_control.xacro" />
+  
+  <!-- Include UR20 Arm -->
+  <xacro:property name="arm_position_x" default="0.0"/>
+  <xacro:property name="arm_position_y" default="0.0"/>
+  <xacro:property name="arm_position_z" default="0.0"/>
+  <xacro:property name="arm_orientation_r" default="0.0"/>
+  <xacro:property name="arm_orientation_p" default="0.0"/>
+  <xacro:property name="arm_orientation_y" default="0.0"/>
+
+  <xacro:arg name="prefix" default="" />
+  <xacro:arg name="load_kinematics_file" default="true"/>
+
+  <xacro:macro name="mpc" params="prefix load_kinematics_file">
+
+    <link name="world" />
+
+    <!-- UR20 Robot Arm    -->
+    <xacro:if value="${load_kinematics_file}">
+      <xacro:ur20_robot 
+        prefix="">
+      </xacro:ur20_robot>
+
+      <joint name="base_joint" type="fixed">
+        <origin xyz="${arm_position_x} ${arm_position_y} ${arm_position_z}" rpy="${arm_orientation_r} ${arm_orientation_p} ${arm_orientation_y}"/>
+        <parent link="world" />
+        <child link="base_link" />
+      </joint>
+    </xacro:if>
+
+    <xacro:unless value="${load_kinematics_file}">
+      <xacro:ur20_robot 
+        prefix="">
+      </xacro:ur20_robot>
+
+      <joint name="base_joint" type="fixed">
+        <origin xyz="${arm_position_x} ${arm_position_y} ${arm_position_z}" rpy="${arm_orientation_r} ${arm_orientation_p} ${arm_orientation_y}"/>
+        <parent link="world" />
+        <child link="base_link" />
+        </joint>
+    </xacro:unless>
+
+    <joint name="tool_controller_fake_joint" type="fixed">
+    <parent link="tool0"/>
+    <child link="adapter_plate_base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 -3.14159265359"/>
+    <axis xyz="0 0 1" />
+    </joint>
+
+    <joint name="gripper_fake_joint" type="fixed">
+    <parent link="adapter_plate_base_link"/>
+    <child link="gripper_base_link"/>
+    <origin xyz="0 0 0.02" rpy="0 0 0"/>
+    <axis xyz="0 0 1" />
+    </joint>
+
+  </xacro:macro>
+  
+  <xacro:mpc prefix="$(arg prefix)" load_kinematics_file="$(arg load_kinematics_file)"/>
+  <xacro:ros_control/>
+
+</robot>
