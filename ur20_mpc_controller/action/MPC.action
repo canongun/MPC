@@ -1,0 +1,9 @@
+# goal
+---
+# result
+bool success
+---
+# feedback
+float64[] current_position
+float64[] current_orientation
+float64[] joint_velocities

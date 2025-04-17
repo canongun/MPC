@@ -1,0 +1,147 @@
+# MPC Development Log for UR20 Mobile Manipulation - Updated
+## Project Overview
+- **Goal**: Develop a Model Predictive Controller (MPC) for stabilizing a UR20 robot arm's end-effector while mounted on a mobile platform
+- **Platform**: Mobile base with two differential wheels and two caster wheels
+- **Robot**: Universal Robots UR20 manipulator
+- **Framework**: ROS (Robot Operating System)
+
+## Development Timeline and Findings
+
+### 1. Initial Implementation (First Phase)
+- Created basic ROS architecture with action server/client
+- Implemented basic optimization-based controller
+- Set up configuration system using YAML
+- Established base motion simulation for testing
+
+### 2. First Control Attempt
+#### Implementation:
+- Used optimization-based approach with SLSQP
+- Added cost terms for:
+  - Position tracking
+  - Orientation maintenance
+  - Control effort minimization
+- Results:
+  - Slow execution (~1Hz)
+  - Significant oscillations
+  - Poor tracking performance
+
+### 3. Performance Improvements (Second Phase)
+#### Changes Made:
+- Optimized computation time
+- Reduced horizon length to 3
+- Added warm starting
+- Modified optimization parameters
+Results:
+- Achieved 50Hz control rate
+- Still had oscillation issues
+- Tracking performance remained suboptimal
+
+### 4. Oscillation Reduction (Third Phase)
+#### Implemented:
+- Added damping terms
+- Introduced smoothness costs
+- Modified weight parameters
+Results:
+- Reduced oscillations
+- Motion became too slow
+- Lost tracking performance
+
+### 5. Velocity Matching Focus (Fourth Phase)
+#### Changes:
+- Modified cost function to prioritize velocity matching
+- Added explicit velocity compensation terms
+Results:
+- Better velocity matching
+- More stable motion
+- Still not achieving perfect base motion compensation
+
+### 6. Critical Realization and Transition to True MPC (Fifth Phase)
+#### Identified Issues:
+- Previous implementation was not true MPC
+- Lacked proper prediction and horizon utilization
+- Focused too much on immediate state feedback
+
+#### Implemented True MPC Components:
+python
+# Model-based Prediction
+x_current = self.dynamics.predict_next_state(x_current, u_k)
+# Receding Horizon Control
+control_sequence = x.reshape(self.horizon, self.dynamics.n_controls)
+return result.x[:self.dynamics.n_controls]  # Only first control
+# Future State Evolution
+for k in range(self.horizon):
+    stage_cost = self.calculate_stage_cost(x_current, target_ee_pose, base_k, u_k, k)
+    x_current = self.dynamics.predict_next_state(x_current, u_k)
+# Terminal Cost
+terminal_cost = self.calculate_terminal_cost(x_current, target_ee_pose, base_trajectory[-1])
+#### Key MPC Elements Added:
+1. **State Prediction**:
+   - Forward simulation of system dynamics
+   - Consideration of future states
+   - Integration of predicted base motion
+
+2. **Cost Structure**:
+   - Stage costs over horizon
+   - Terminal cost for stability
+   - Time-varying weights
+
+3. **Receding Horizon**:
+   - Optimization over future horizon
+   - Application of first control only
+   - Continuous replanning
+
+4. **Base Motion Integration**:
+   - Prediction of base trajectory
+   - Incorporation into cost function
+   - Consideration in state evolution
+
+### 7. Stability and Performance Improvements (Sixth Phase)
+#### Identified Issues:
+- End-effector deviation from initial position
+- Small oscillations in position control
+- Orientation drift over time
+- Inconsistent base motion compensation
+
+#### Implemented Solutions:
+1. **Enhanced Cost Function Structure**:
+
+## Current Technical Implementation
+
+### MPC Structure:
+Model Predictive Controller
+├── State Prediction
+│   ├── System Dynamics
+│   ├── Base Motion Prediction
+│   └── State Evolution
+├── Cost Function
+│   ├── Stage Costs
+│   │   ├── Tracking Error
+│   │   ├── Velocity Matching
+│   │   └── Control Effort
+│   └── Terminal Cost
+└── Optimization
+    ├── Receding Horizon
+    ├── Constraints
+### Key Parameters:
+mpc_controller:
+  horizon: 3
+  dt: 0.05
+  weights:
+    position: 5.0
+    orientation: 2.0
+    control: 0.03
+    smooth: 0.08
+### Current Performance Metrics:
+- Control Rate: 50Hz
+- Prediction Horizon: 3 steps
+- Optimization Method: SLSQP
+- Computation Time: ~20ms per iteration
+
+## Next Steps
+1. Fine-tune MPC parameters
+2. Improve base motion prediction
+3. Enhance terminal cost design
+4. Optimize computation efficiency
+
+## Testing Instructions
+1. Launch controller:

@@ -1,0 +1,9 @@
+<launch>
+    <!-- Load controller parameters into the node's namespace -->
+    <node pkg="ur20_mpc_controller" 
+          type="mpc_action_server.py" 
+          name="mpc_controller" 
+          output="screen">
+        <rosparam command="load" file="$(find ur20_mpc_controller)/config/controller_params.yaml"/>
+    </node>
+</launch>
