@@ -11,8 +11,8 @@
 
   <!-- Robot configuration -->
   <arg name="x_init_pose" default="0"/>
-  <arg name="y_init_pose" default="0.1"/>
-  <arg name="z_init_pose" default="0.5"/>
+  <arg name="y_init_pose" default="0.0"/>
+  <arg name="z_init_pose" default="0.0"/>
   <arg name="yaw_init_pose" default="0"/>
 
   <!-- Launch Gazebo -->
@@ -54,7 +54,7 @@
   <!-- Launch spawner in the root namespace to find /controller_manager services -->
   <!-- Provide fully namespaced controller names in args -->
   <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false"
-        output="screen" args="/arm/scaled_pos_traj_controller joint_state_controller"/>
+        output="screen" args="/arm/scaled_pos_traj_controller joint_state_controller platform_x_joint_position_controller"/>
 
   <!-- Start Robot State Publisher -->
   <!-- <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher"

@@ -25,3 +25,7 @@ arm:
 joint_state_controller: # Keep name consistent with spawner if used, or remove if relying on gazebo_ros_control
   type: joint_state_controller/JointStateController
   publish_rate: 100.0 # Rate to publish joint states (Hz)
+
+platform_x_joint_position_controller:
+  type: position_controllers/JointPositionController
+  joint: platform_x_joint

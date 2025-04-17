@@ -15,8 +15,8 @@
   
   <!-- Include UR20 Arm -->
   <xacro:property name="arm_position_x" default="0.0"/>
-  <xacro:property name="arm_position_y" default="0.0"/>
-  <xacro:property name="arm_position_z" default="0.0"/>
+  <xacro:property name="arm_position_y" default="0.1"/>
+  <xacro:property name="arm_position_z" default="0.5"/>
   <xacro:property name="arm_orientation_r" default="0.0"/>
   <xacro:property name="arm_orientation_p" default="0.0"/>
   <xacro:property name="arm_orientation_y" default="0.0"/>
@@ -36,7 +36,7 @@
 
       <joint name="base_joint" type="fixed">
         <origin xyz="${arm_position_x} ${arm_position_y} ${arm_position_z}" rpy="${arm_orientation_r} ${arm_orientation_p} ${arm_orientation_y}"/>
-        <parent link="world" />
+        <parent link="mobile_base_link" />
         <child link="base_link" />
       </joint>
     </xacro:if>
@@ -48,9 +48,9 @@
 
       <joint name="base_joint" type="fixed">
         <origin xyz="${arm_position_x} ${arm_position_y} ${arm_position_z}" rpy="${arm_orientation_r} ${arm_orientation_p} ${arm_orientation_y}"/>
-        <parent link="world" />
+        <parent link="mobile_base_link" />
         <child link="base_link" />
-        </joint>
+      </joint>
     </xacro:unless>
 
     <joint name="tool_controller_fake_joint" type="fixed">
@@ -65,6 +65,26 @@
     <child link="gripper_base_link"/>
     <origin xyz="0 0 0.02" rpy="0 0 0"/>
     <axis xyz="0 0 1" />
+    </joint>
+
+    <link name="mobile_base_link">
+      <!-- Optional: Add minimal visual/collision/inertial properties if you want to see it or have it interact physically -->
+      <visual>
+        <geometry><box size="0.1 0.1 0.05"/></geometry>
+        <material name="grey"><color rgba="0.5 0.0 0.0 1"/></material>
+      </visual>
+      <inertial>
+        <mass value="1"/>
+        <inertia ixx="0.01" iyy="0.01" izz="0.01" ixy="0" ixz="0" iyz="0"/>
+      </inertial>
+    </link>
+
+    <joint name="platform_x_joint" type="prismatic">
+      <parent link="world"/>
+      <child link="mobile_base_link"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <axis xyz="1 0 0"/> <!-- Movement along X axis -->
+      <limit lower="-1.0" upper="1.0" effort="100" velocity="1.0"/> <!-- Adjust limits as needed -->
     </joint>
 
   </xacro:macro>
