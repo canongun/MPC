@@ -4,12 +4,13 @@ import rospy
 import numpy as np
 from std_msgs.msg import Float64 # Use Float64 for velocity command as well
 
-def simulate_platform_velocity_motion():
-    rospy.init_node('platform_velocity_motion_simulator') # Renamed node
+# Renamed function
+def simulate_platform_prismatic_velocity_motion():
+    rospy.init_node('platform_prismatic_velocity_motion_simulator') # Renamed node
 
     # Publish to the JointVelocityController's command topic
     command_pub = rospy.Publisher(
-        '/platform_x_joint_velocity_controller/command', # Updated topic name
+        '/platform_prismatic_joint_velocity_controller/command', # Updated topic name
         Float64,
         queue_size=10
     )
@@ -24,7 +25,7 @@ def simulate_platform_velocity_motion():
     command_msg = Float64()
 
     start_time = rospy.get_time()
-    rospy.loginfo("Starting platform X velocity motion simulation...")
+    rospy.loginfo("Starting platform prismatic velocity motion simulation...")
     while not rospy.is_shutdown():
         current_time = rospy.get_time()
         t = current_time - start_time
@@ -37,12 +38,12 @@ def simulate_platform_velocity_motion():
 
         # Publish the command message
         command_pub.publish(command_msg)
-        rospy.logdebug(f"Publishing platform_x velocity command: {x_velocity_command:.3f}")
+        rospy.logdebug(f"Publishing platform prismatic velocity command: {x_velocity_command:.3f}")
 
         rate.sleep()
 
 if __name__ == '__main__':
     try:
-        simulate_platform_velocity_motion() # Renamed function call
+        simulate_platform_prismatic_velocity_motion() # Renamed function call
     except rospy.ROSInterruptException:
         rospy.loginfo("Platform motion simulation stopped.")

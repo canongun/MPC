@@ -79,11 +79,11 @@
       </inertial>
     </link>
 
-    <joint name="platform_x_joint" type="prismatic">
+    <joint name="platform_prismatic_joint" type="prismatic">
       <parent link="world"/>
       <child link="mobile_base_link"/>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <axis xyz="1 0 0"/> <!-- Movement along X axis -->
+      <axis xyz="0 1 0"/> <!-- Movement along X axis -->
       <limit lower="-1.0" upper="1.0" effort="100" velocity="1.0"/> <!-- Adjust limits as needed -->
     </joint>
 

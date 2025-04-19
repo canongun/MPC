@@ -27,6 +27,6 @@ joint_state_controller: # Keep name consistent with spawner if used, or remove i
   publish_rate: 100.0 # Rate to publish joint states (Hz)
 
 # Renamed controller to reflect velocity control
-platform_x_joint_velocity_controller:
+platform_prismatic_joint_velocity_controller:
   type: velocity_controllers/JointVelocityController
-  joint: platform_x_joint
+  joint: platform_prismatic_joint

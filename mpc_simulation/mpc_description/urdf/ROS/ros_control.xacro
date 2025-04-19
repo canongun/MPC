@@ -8,13 +8,13 @@
     </plugin>
   </gazebo>
 
-  <transmission name="platform_x_trans">
+  <transmission name="platform_prismatic_trans">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="platform_x_joint">
+    <joint name="platform_prismatic_joint">
       <!-- Use VelocityJointInterface to directly command velocity -->
       <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
     </joint>
-    <actuator name="platform_x_motor">
+    <actuator name="platform_prismatic_motor">
       <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
