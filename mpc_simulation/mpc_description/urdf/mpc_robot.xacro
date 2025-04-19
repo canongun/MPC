@@ -21,10 +21,12 @@
   <xacro:property name="arm_orientation_p" default="0.0"/>
   <xacro:property name="arm_orientation_y" default="0.0"/>
 
+  <!-- Arguments -->
   <xacro:arg name="prefix" default="" />
   <xacro:arg name="load_kinematics_file" default="true"/>
+  <xacro:arg name="motion_type" default="linear"/>
 
-  <xacro:macro name="mpc" params="prefix load_kinematics_file">
+  <xacro:macro name="mpc" params="prefix load_kinematics_file motion_type">
 
     <link name="world" />
 
@@ -79,18 +81,31 @@
       </inertial>
     </link>
 
-    <joint name="platform_prismatic_joint" type="prismatic">
-      <parent link="world"/>
-      <child link="mobile_base_link"/>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <axis xyz="0 1 0"/> <!-- Movement along X axis -->
-      <limit lower="-1.0" upper="1.0" effort="100" velocity="1.0"/> <!-- Adjust limits as needed -->
-    </joint>
+    <!-- Conditional Joint Definition based on motion_type -->
+    <xacro:if value="${motion_type == 'linear'}">
+      <joint name="platform_prismatic_joint" type="prismatic">
+        <parent link="world"/>
+        <child link="mobile_base_link"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/> <!-- Defaulting to Y axis for linear motion -->
+        <limit lower="-1.0" upper="1.0" effort="100" velocity="1.0"/>
+      </joint>
+    </xacro:if>
+
+    <xacro:if value="${motion_type == 'angular'}">
+      <joint name="platform_revolute_joint" type="revolute">
+        <parent link="world"/>
+        <child link="mobile_base_link"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/> <!-- Rotation around Z axis -->
+        <limit lower="-${pi}" upper="${pi}" effort="100" velocity="1.0"/>
+      </joint>
+    </xacro:if>
 
   </xacro:macro>
   
-  <xacro:mpc prefix="$(arg prefix)" load_kinematics_file="$(arg load_kinematics_file)"/>
-  <xacro:ros_control/>
+  <xacro:mpc prefix="$(arg prefix)" load_kinematics_file="$(arg load_kinematics_file)" motion_type="$(arg motion_type)"/>
+  <xacro:ros_control motion_type="$(arg motion_type)"/>
 
   <!-- Add Gazebo plugin to publish ground truth odometry for mobile_base_link -->
   <gazebo>

@@ -9,6 +9,9 @@
   <arg name="verbose" default="false" doc="Start Gazebo in verbose mode (set false if too noisy)"/>
   <arg name="world_name" default="worlds/empty.world" doc="World file to load"/>
 
+  <!-- Platform Motion Type -->
+  <arg name="motion_type" default="linear" doc="Type of platform motion ('linear' or 'angular')"/>
+
   <!-- Robot configuration -->
   <arg name="x_init_pose" default="0"/>
   <arg name="y_init_pose" default="0.0"/>
@@ -28,7 +31,7 @@
 
   <!-- Load Robot Description -->
   <param name="robot_description"
-         command="$(find xacro)/xacro '$(find mpc_description)/urdf/mpc_robot.xacro'" />
+         command="$(find xacro)/xacro '$(find mpc_description)/urdf/mpc_robot.xacro' motion_type:=$(arg motion_type)" />
 
   <!-- Load Controller Configuration -->
   <rosparam file="$(find mpc_description)/config/ur20_controllers.yaml" command="load"/>
@@ -51,10 +54,19 @@
               -unpause"/>
 
   <!-- Spawn Controllers -->
-  <!-- Launch spawner in the root namespace to find /controller_manager services -->
-  <!-- Provide fully namespaced controller names in args -->
-  <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false"
-        output="screen" args="/arm/scaled_pos_traj_controller joint_state_controller platform_prismatic_joint_velocity_controller"/>
+  <!-- Conditionally spawn the correct platform controller based on motion_type -->
+  <group if="$(eval motion_type == 'linear')">
+    <node name="controller_spawner_linear" pkg="controller_manager" type="spawner" respawn="false"
+          output="screen" args="/arm/scaled_pos_traj_controller 
+                               joint_state_controller 
+                               platform_prismatic_joint_velocity_controller"/>
+  </group>
+  <group if="$(eval motion_type == 'angular')">
+    <node name="controller_spawner_angular" pkg="controller_manager" type="spawner" respawn="false"
+          output="screen" args="/arm/scaled_pos_traj_controller 
+                               joint_state_controller 
+                               platform_revolute_joint_velocity_controller"/>
+  </group>
 
   <!-- Start Robot State Publisher -->
   <!-- <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher"

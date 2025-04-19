@@ -1,24 +1,39 @@
 <?xml version="1.0"?>
 
 <robot xmlns:xacro="http://ros.org/wiki/xacro" name="arm_control">		
-<xacro:macro name="ros_control" >
-  <gazebo>
-    <plugin name="gazebo_ros_control" filename="libgazebo_ros_control.so">
-      <robotNamespace>/</robotNamespace>
-    </plugin>
-  </gazebo>
+  <xacro:arg name="motion_type" default="linear"/>
 
-  <transmission name="platform_prismatic_trans">
-    <type>transmission_interface/SimpleTransmission</type>
-    <joint name="platform_prismatic_joint">
-      <!-- Use VelocityJointInterface to directly command velocity -->
-      <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
-    </joint>
-    <actuator name="platform_prismatic_motor">
-      <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
-      <mechanicalReduction>1</mechanicalReduction>
-    </actuator>
-  </transmission>
+  <xacro:macro name="ros_control" params="motion_type">
+    <gazebo>
+      <plugin name="gazebo_ros_control" filename="libgazebo_ros_control.so">
+        <robotNamespace>/</robotNamespace>
+      </plugin>
+    </gazebo>
 
-</xacro:macro>
+    <xacro:if value="${motion_type == 'linear'}">
+      <transmission name="platform_prismatic_trans">
+        <type>transmission_interface/SimpleTransmission</type>
+        <joint name="platform_prismatic_joint">
+          <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+        </joint>
+        <actuator name="platform_prismatic_motor">
+          <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+          <mechanicalReduction>1</mechanicalReduction>
+        </actuator>
+      </transmission>
+    </xacro:if>
+
+    <xacro:if value="${motion_type == 'angular'}">
+      <transmission name="platform_revolute_trans">
+        <type>transmission_interface/SimpleTransmission</type>
+        <joint name="platform_revolute_joint">
+          <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+        </joint>
+        <actuator name="platform_revolute_motor">
+          <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+          <mechanicalReduction>1</mechanicalReduction>
+        </actuator>
+      </transmission>
+    </xacro:if>
+  </xacro:macro>
 </robot>
