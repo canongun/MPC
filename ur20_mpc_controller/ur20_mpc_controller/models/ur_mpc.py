@@ -187,12 +187,12 @@ class URMPC:
             # Store solution for warm start in next iteration
             self.previous_solution = result.x
             
-            # Debug output
-            predicted_trajectory = self.predict_trajectory(current_state, 
-                                                         result.x.reshape(self.horizon, -1), 
-                                                         self.horizon)
-            ee_vel = J_pos @ control
-            ee_ang_vel = J_ori @ control
+            # # Debug output
+            # predicted_trajectory = self.predict_trajectory(current_state, 
+            #                                              result.x.reshape(self.horizon, -1), 
+            #                                              self.horizon)
+            # ee_vel = J_pos @ control
+            # ee_ang_vel = J_ori @ control
             
             # rospy.loginfo(f"Base linear velocity: {base_state['linear_velocity']}")
             # rospy.loginfo(f"Base angular velocity: {base_state['angular_velocity']}")
