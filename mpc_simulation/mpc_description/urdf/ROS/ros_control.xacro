@@ -11,11 +11,11 @@
   <transmission name="platform_x_trans">
     <type>transmission_interface/SimpleTransmission</type>
     <joint name="platform_x_joint">
-      <!-- Use PositionJointInterface to directly command position -->
-      <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+      <!-- Use VelocityJointInterface to directly command velocity -->
+      <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
     </joint>
     <actuator name="platform_x_motor">
-      <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+      <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
   </transmission>

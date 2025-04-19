@@ -2,44 +2,47 @@
 
 import rospy
 import numpy as np
-from std_msgs.msg import Float64 # Use Float64 for position command
+from std_msgs.msg import Float64 # Use Float64 for velocity command as well
 
-def simulate_platform_x_motion():
-    rospy.init_node('platform_x_motion_simulator')
+def simulate_platform_velocity_motion():
+    rospy.init_node('platform_velocity_motion_simulator') # Renamed node
 
-    # Publish to the JointPositionController's command topic
+    # Publish to the JointVelocityController's command topic
     command_pub = rospy.Publisher(
-        '/platform_x_joint_position_controller/command',
+        '/platform_x_joint_velocity_controller/command', # Updated topic name
         Float64,
         queue_size=10
     )
     rate = rospy.Rate(10)  # 10 Hz
 
     # Motion parameters
-    amplitude = 0.2  # meters (gives 0.4m total range: -0.2m to +0.2m)
+    amplitude = 0.2  # meters (position amplitude)
     frequency = 0.1  # Hz
+    omega = 2 * np.pi * frequency # Angular frequency
 
     # Create a Float64 message object once
     command_msg = Float64()
 
-    t = 0.0
-    rospy.loginfo("Starting platform X motion simulation...")
+    start_time = rospy.get_time()
+    rospy.loginfo("Starting platform X velocity motion simulation...")
     while not rospy.is_shutdown():
-        # Compute desired position (sinusoidal motion in X direction)
-        x_position_command = amplitude * np.sin(2 * np.pi * frequency * t)
+        current_time = rospy.get_time()
+        t = current_time - start_time
+
+        # Compute desired velocity (derivative of A*sin(wt) is A*w*cos(wt))
+        x_velocity_command = amplitude * omega * np.cos(omega * t)
 
         # Set the command value in the message
-        command_msg.data = x_position_command
+        command_msg.data = x_velocity_command
 
         # Publish the command message
         command_pub.publish(command_msg)
-        rospy.logdebug(f"Publishing platform_x command: {x_position_command:.3f}")
+        rospy.logdebug(f"Publishing platform_x velocity command: {x_velocity_command:.3f}")
 
-        t += 0.1  # Time increment (matches rate)
         rate.sleep()
 
 if __name__ == '__main__':
     try:
-        simulate_platform_x_motion()
+        simulate_platform_velocity_motion() # Renamed function call
     except rospy.ROSInterruptException:
         rospy.loginfo("Platform motion simulation stopped.")
