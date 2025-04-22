@@ -14,7 +14,7 @@ def simulate_platform_velocity_motion():
     if motion_type == "angular":
         controller_name = "platform_revolute_joint_velocity_controller"
         # Motion parameters for angular
-        amplitude = np.radians(30.0) # Amplitude in radians (e.g., 30 degrees)
+        amplitude = np.radians(20.0) # Amplitude in radians (e.g., 30 degrees)
         unit = "rad/s"
         motion_description = "angular (revolute)"
     elif motion_type == "linear":

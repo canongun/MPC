@@ -69,11 +69,11 @@
   </group>
 
   <!-- Start Robot State Publisher -->
-  <!-- <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher"
+  <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher"
         respawn="false" output="screen">
     <param name="publish_frequency" type="double" value="50.0" />
     <param name="use_tf_static" type="bool" value="true"/>
-  </node> -->
+  </node>
 
   <!-- Start Joint State Publisher GUI (optional, can be removed) -->
   <!-- Sometimes helpful for debugging initial setup -->
