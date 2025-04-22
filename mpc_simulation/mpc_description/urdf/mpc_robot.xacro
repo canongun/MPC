@@ -129,4 +129,25 @@
     </plugin>
   </gazebo>
 
+  <gazebo>
+    <plugin name="gazebo_ros_p3d" filename="libgazebo_ros_p3d.so">
+      <!-- Frame specification -->
+      <frameName>world</frameName>             <!-- The reference frame (world exists in Gazebo) -->
+      <bodyName>gripper_end_tool_link</bodyName>   <!-- The link whose pose/velocity we want -->
+      
+      <!-- Topic to publish on -->
+      <topicName>/end_effector/ground_truth</topicName> <!-- Target topic name -->
+      
+      <!-- Update rate -->
+      <updateRate>100.0</updateRate>            <!-- Publishing frequency (Hz) -->
+      
+      <!-- Optional: Noise can be added, but usually 0 for ground truth -->
+      <gaussianNoise>0.0</gaussianNoise>
+      
+      <!-- Initial offset (if needed, usually 0) -->
+      <xyzOffset>0 0 0</xyzOffset>
+      <rpyOffset>0 0 0</rpyOffset>
+    </plugin>
+  </gazebo>
+
 </robot>
