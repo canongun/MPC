@@ -58,6 +58,28 @@ class URMPC:
         # Add damping weight
         self.w_damping = rospy.get_param('~mpc_controller/weights/damping', 0.5)
         
+        # ----------  Mobile‑base Dynamic Model Parameters ----------
+        dyn_ns = '~mpc_controller/base_dynamics'
+        self.use_dynamic_model = rospy.get_param(f'{dyn_ns}/use_dynamic_model', False)
+
+        # Physical parameters (defaults roughly for Innok Heros)
+        self.base_mass        = rospy.get_param(f'{dyn_ns}/mass', 180.0)       # kg
+        self.base_Iz          = rospy.get_param(f'{dyn_ns}/I_z', 62.0)         # kg·m²
+        self.wheel_radius     = rospy.get_param(f'{dyn_ns}/wheel_radius', 0.165)
+        self.half_wheelbase   = rospy.get_param(f'{dyn_ns}/half_wheelbase', 0.35)
+
+        # Linear / angular damping
+        self.k_v              = rospy.get_param(f'{dyn_ns}/k_v', 25.0)
+        self.k_omega          = rospy.get_param(f'{dyn_ns}/k_omega', 8.0)
+
+        # First‑order actuator lags (if wheel commands are known)
+        self.tau_linear       = rospy.get_param(f'{dyn_ns}/tau_linear', 0.45)
+        self.tau_angular      = rospy.get_param(f'{dyn_ns}/tau_angular', 0.30)
+
+        # Optional caster wheel
+        self.use_caster       = rospy.get_param(f'{dyn_ns}/use_caster', False)
+        self.tau_caster       = rospy.get_param(f'{dyn_ns}/tau_caster', 0.25)
+
     def compute_control(self, 
                 current_joint_state: Dict,
                 current_ee_pose: Dict,
@@ -484,16 +506,9 @@ class URMPC:
         
         return transformed_state
 
-    def predict_base_motion(self, current_base_state: Dict, horizon: int) -> List[Dict]:
-        """Predict base motion over horizon with filtered acceleration estimation
-        
-        Args:
-            current_base_state: Current base state including position, orientation, velocities
-            horizon: Number of timesteps to predict
-            
-        Returns:
-            List of predicted base states over horizon
-        """
+    # ------------------------------------------------------------------
+    # Kinematic Extrapolation Model
+    def _predict_base_kinematic(self, current_base_state: Dict, horizon: int):
         base_trajectory = []
         dt = self.dt
         
@@ -568,6 +583,68 @@ class URMPC:
             base_trajectory.append(predicted_state)
         
         return base_trajectory
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Complex Dynamic Model
+    def _predict_base_dynamic(self, current_base_state: Dict, horizon: int) -> List[Dict]:
+        """
+        Forward‑integrate a planar rigid‑body model of a differential‑drive base.
+        Assumes body‑frame forward speed v and yaw rate ω.
+        Uses first‑order actuator lag to move current v, ω towards the last commanded
+        values if they are included in base_state, falls back to passive damping 
+        otherwise.
+        """
+        dt = self.dt
+        traj = []
+
+        # Unpack current state (world frame)
+        pos   = current_base_state['position'].copy()        # [x, y, z]
+        yaw   = current_base_state['orientation'][2]         # assume planar
+        v_bx  = current_base_state['linear_velocity'][0]     # body‑x speed
+        ω     = current_base_state['angular_velocity'][2]    # yaw rate
+
+        # Optional commanded velocities (needed for act. lag model)
+        v_cmd = current_base_state.get('v_cmd', v_bx)
+        ω_cmd = current_base_state.get('omega_cmd', ω)
+
+        for k in range(horizon):
+            # --- longitudinal dynamics ---------------------------------
+            F_t  = (self.base_mass / self.tau_linear) * (v_cmd - v_bx)
+            a    = (F_t - self.k_v * v_bx) / self.base_mass
+            v_bx = v_bx + a * dt
+
+            # --- yaw dynamics ------------------------------------------
+            τ_z  = (self.base_Iz / self.tau_angular) * (ω_cmd - ω)
+            α    = (τ_z - self.k_omega * ω) / self.base_Iz
+            ω    = ω + α * dt
+
+            # --- kinematics (world frame) ------------------------------
+            yaw  = yaw + ω * dt
+            cosψ, sinψ = np.cos(yaw), np.sin(yaw)
+            vx_w = v_bx * cosψ
+            vy_w = v_bx * sinψ
+            pos  = pos + np.array([vx_w, vy_w, 0.0]) * dt
+
+            traj.append({
+                'position':         pos.copy(),
+                'orientation':      np.array([0.0, 0.0, yaw]),
+                'linear_velocity':  np.array([vx_w, vy_w, 0.0]),
+                'angular_velocity': np.array([0.0, 0.0, ω])
+            })
+        return traj
+    # ------------------------------------------------------------------
+
+    # Dispatcher (called by compute_control)
+    def predict_base_motion(self, current_base_state: Dict, horizon: int) -> List[Dict]:
+        """
+        Wrapper that chooses between the old kinematic extrapolation and the new
+        dynamic‑model integration based on the `use_dynamic_model` flag.
+        """
+        if self.use_dynamic_model:
+            return self._predict_base_dynamic(current_base_state, horizon)
+        else:
+            return self._predict_base_kinematic(current_base_state, horizon)
 
     def _cost_function(self, x: np.ndarray, current_state: np.ndarray, 
                       target_ee_pose: Dict, base_trajectory: List[Dict]) -> float:
