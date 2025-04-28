@@ -136,6 +136,11 @@ class URMPC:
             # 5. Calculate target compensation velocities (world frame)
             target_lin_vel_w = -v_induced_ee_w
             target_ang_vel_w = -platform_ang_vel_w 
+
+            # Convert target velocities from WORLD → ARM-BASE frame
+            yaw = base_state['orientation'][2]
+            target_lin_vel_b = self._world_to_base(target_lin_vel_w, yaw)
+            target_ang_vel_b = self._world_to_base(target_ang_vel_w, yaw)
             
             rospy.logdebug(f"Target Compensation Velocity (World): Linear={target_lin_vel_w}, Angular={target_ang_vel_w}")
 
@@ -157,9 +162,9 @@ class URMPC:
             # rospy.loginfo(f"Raw angular velocity: {base_state['angular_velocity']}")
             # rospy.loginfo(f"Transformed angular velocity: {transformed_base_state['angular_velocity']}")
      
-            # Combine into full velocity vector
+            # Combine into full velocity vector (all in arm-base frame)
             J_full = np.vstack([J_pos, J_ori])
-            base_vel_full = np.concatenate([target_lin_vel_w, target_ang_vel_w])
+            base_vel_full = np.concatenate([target_lin_vel_b, target_ang_vel_b])
             
             # Compute initial velocities using damped least squares
             lambda_ = 0.01
@@ -271,9 +276,14 @@ class URMPC:
         target_comp_ang_vel_k = -platform_ang_vel_w_k
         # --- End of induced velocity calculation ---
 
-        # Velocity tracking errors: Compare arm-generated velocity to the target compensation velocity
-        lin_vel_error = ee_lin_vel_arm - target_comp_lin_vel_k
-        ang_vel_error = ee_ang_vel_arm - target_comp_ang_vel_k
+        # Rotate target compensation velocities into arm base frame
+        yaw_k = base_state['orientation'][2]
+        target_comp_lin_vel_k_b = self._world_to_base(target_comp_lin_vel_k, yaw_k)
+        target_comp_ang_vel_k_b = self._world_to_base(target_comp_ang_vel_k, yaw_k)
+
+        # Velocity tracking errors: arm-generated (base frame) vs. target (base frame)
+        lin_vel_error = ee_lin_vel_arm - target_comp_lin_vel_k_b
+        ang_vel_error = ee_ang_vel_arm - target_comp_ang_vel_k_b
         
         # Position and orientation errors (comparing predicted EE pose to fixed target)
         pos_error = ee_pos - target_ee_pose['position']
@@ -345,9 +355,14 @@ class URMPC:
         target_comp_ang_vel_final = -platform_ang_vel_w_final
         # --- End of induced velocity calculation ---
 
-        # Terminal Velocity errors: Compare final arm velocity to final target compensation velocity
-        lin_vel_error_final = ee_lin_vel_arm_final - target_comp_lin_vel_final
-        ang_vel_error_final = ee_ang_vel_arm_final - target_comp_ang_vel_final
+        # Rotate target compensation velocities into arm base frame
+        yaw_final = final_base_state['orientation'][2]
+        target_comp_lin_vel_final_b = self._world_to_base(target_comp_lin_vel_final, yaw_final)
+        target_comp_ang_vel_final_b = self._world_to_base(target_comp_ang_vel_final, yaw_final)
+
+        # Terminal velocity errors (all in base frame)
+        lin_vel_error_final = ee_lin_vel_arm_final - target_comp_lin_vel_final_b
+        ang_vel_error_final = ee_ang_vel_arm_final - target_comp_ang_vel_final_b
         
         # Terminal Position and orientation errors
         pos_error_final = ee_pos_final - target_ee_pose['position']
@@ -692,6 +707,16 @@ class URMPC:
             current_state = next_state
         
         return trajectory
+
+    # ------------------------------------------------------------------
+    # Helper: rotate vectors from WORLD → ARM-BASE frame
+    def _world_to_base(self, vec_w: np.ndarray, yaw: float) -> np.ndarray:
+        """Rotate a 3-D vector from world frame into the robot’s base-link frame."""
+        c, s = np.cos(yaw), np.sin(yaw)
+        R = np.array([[ c,  s, 0],
+                      [-s,  c, 0],
+                      [ 0,  0, 1]])
+        return R @ vec_w
 
 def main():
     """Test the MPC controller"""
