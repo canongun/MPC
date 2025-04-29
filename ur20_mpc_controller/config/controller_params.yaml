@@ -4,7 +4,7 @@ mpc_controller:
 
   # MPC Parameters
   horizon: 1
-  dt: 0.1
+  dt: 0.07
   
   # Cost Function Weights
   weights:
@@ -16,7 +16,7 @@ mpc_controller:
   
   # Active Motion Weights
   active_weights:
-    linear: 20.0
+    linear: 30.0
     angular: 30.0
   
   # Robot Configuration
@@ -25,3 +25,25 @@ mpc_controller:
     y: 0.1
     z: 0.5
     yaw: 0.0
+
+  base_dynamics:
+    use_dynamic_model: true        # set to false to fall back to old predictor
+
+    # -------- physical properties of Innok HEROS (default wheels, swing‑axle) -----
+    mass:             65.0       # kg
+    I_z:              8.0        # kg·m² ← rectangle estimate
+
+    wheel_radius:     0.16       # m     ← wheel_default_properties.xacro
+    half_wheelbase:   0.638      # m     ← ½ · wheel_seperation · multiplier (0.580*2.2/2)
+
+    # -------- lumped resistance / damping coefficients ----------------------------
+    k_v:              25.0       # N·s/m      (rolling resistance)
+    k_omega:          4.0        # N·m·s/rad  (yaw damping)
+
+    # -------- first‑order actuator (cmd_vel → actual) lags ------------------------
+    tau_linear:       0.45       # s  (tune)
+    tau_angular:      0.30       # s  (tune)
+
+    # -------- caster‑wheel disturbance model (disabled for now) -------------------
+    use_caster:       false
+    tau_caster:       0.25       # s
