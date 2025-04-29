@@ -2,9 +2,9 @@
 
 import numpy as np
 import rospy
-from typing import Dict, List, Tuple
+from typing import Dict
 import moveit_commander
-from tf.transformations import euler_from_quaternion, quaternion_from_euler
+from tf.transformations import euler_from_quaternion
 
 class UR20Dynamics:
     def __init__(self):
@@ -99,7 +99,7 @@ class UR20Dynamics:
             
         # Extract current state components
         q = current_state[:self.n_q]
-        dq = current_state[self.n_q:self.n_q + self.n_dq]
+        # dq = current_state[self.n_q:self.n_q + self.n_dq]
         
         # Predict next joint positions and velocities
         q_next = q + control * dt  # Update using control input
