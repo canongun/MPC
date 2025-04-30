@@ -238,7 +238,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
         plt.figure(figsize=(12, 8))
         plt.subplot(2, 1, 1) # Position error magnitude
         plt.plot(pose_times, position_errors * 1000, label='Total Position Error') # Convert to mm
-        plt.title('End-Effector Position Error)')
+        plt.title('End-Effector Position Error')
         plt.ylabel('Error (mm)')
         plt.grid(True)
         plt.legend()
