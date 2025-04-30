@@ -12,7 +12,6 @@ except ImportError:
 
 import numpy as np
 import argparse
-from tf.transformations import quaternion_multiply, quaternion_inverse, euler_from_quaternion
 import sys
 import os # Import os for path manipulation
 
@@ -256,7 +255,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
         plot_filename = os.path.join(output_dir, f"{base_filename}_pos_error.png")
         plt.savefig(plot_filename)
         print(f"Saved position error plot to: {plot_filename}")
-        if show_plots: plt.show()
+        if show_plots: plt.show()  # noqa: E701
         plt.close()
 
         # 2. Orientation Error Plot
@@ -270,7 +269,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
         plot_filename = os.path.join(output_dir, f"{base_filename}_ori_error.png")
         plt.savefig(plot_filename)
         print(f"Saved orientation error plot to: {plot_filename}")
-        if show_plots: plt.show()
+        if show_plots: plt.show()  # noqa: E701
         plt.close()
 
         # 3. Control Inputs Plot
@@ -295,7 +294,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
             plot_filename = os.path.join(output_dir, f"{base_filename}_control_inputs.png")
             plt.savefig(plot_filename)
             print(f"Saved control inputs plot to: {plot_filename}")
-            if show_plots: plt.show()
+            if show_plots: plt.show()  # noqa: E701
             plt.close()
         else:
             print("Skipping control input plot (no data).")
@@ -315,7 +314,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
             plot_filename = os.path.join(output_dir, f"{base_filename}_comp_time.png")
             plt.savefig(plot_filename)
             print(f"Saved computation time plot to: {plot_filename}")
-            if show_plots: plt.show()
+            if show_plots: plt.show()  # noqa: E701
             plt.close()
         else:
             print("Skipping computation time plot (no data).")
@@ -334,7 +333,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
         plot_filename = os.path.join(output_dir, f"{base_filename}_trajectory_xy.png")
         plt.savefig(plot_filename)
         print(f"Saved XY trajectory plot to: {plot_filename}")
-        if show_plots: plt.show()
+        if show_plots: plt.show()  # noqa: E701
         plt.close()
 
         print("Plot generation complete.")
@@ -356,7 +355,7 @@ if __name__ == "__main__":
     # Check if rospy is needed and initialize if necessary (for logwarn_throttle)
     try:
         rospy.get_name()
-    except:
+    except:  # noqa: E722
         # Only init_node if it's not already running (e.g. script run standalone)
         # This is a basic check; more robust checks might be needed in complex scenarios.
         # If running within a ROS node, this init might cause issues.
