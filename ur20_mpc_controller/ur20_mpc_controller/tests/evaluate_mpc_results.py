@@ -238,7 +238,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
         plt.figure(figsize=(12, 8))
         plt.subplot(2, 1, 1) # Position error magnitude
         plt.plot(pose_times, position_errors * 1000, label='Total Position Error') # Convert to mm
-        plt.title(f'End-Effector Position Error ({base_filename})')
+        plt.title('End-Effector Position Error)')
         plt.ylabel('Error (mm)')
         plt.grid(True)
         plt.legend()
@@ -261,7 +261,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
         # 2. Orientation Error Plot
         plt.figure(figsize=(10, 5))
         plt.plot(pose_times, orientation_errors)
-        plt.title(f'End-Effector Orientation Error ({base_filename})')
+        plt.title('End-Effector Orientation Error)')
         plt.xlabel('Time (s)')
         plt.ylabel('Quaternion Distance Error')
         plt.grid(True)
@@ -285,7 +285,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
 
             for i in range(control_inputs.shape[1]): # Iterate through joints (columns)
                 plt.plot(time_axis, control_inputs[:, i], label=f'Joint {i+1} ({joint_names[i]})')
-            plt.title(f'Control Inputs (Joint Velocities) ({base_filename})')
+            plt.title('Control Inputs (Joint Velocities))')
             plt.xlabel(x_label)
             plt.ylabel('Velocity (rad/s)')
             plt.legend(loc='center left', bbox_to_anchor=(1, 0.5)) # Move legend outside
@@ -306,7 +306,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
             time_axis = timing_times if len(timing_times) == len(computation_times) else np.arange(len(computation_times))
             x_label = 'Time (s)' if len(timing_times) == len(computation_times) else 'Computation Step Index'
             plt.plot(time_axis, np.array(computation_times) * 1000) # Convert to ms
-            plt.title(f'MPC Computation Time ({base_filename})')
+            plt.title('MPC Computation Time)')
             plt.xlabel(x_label)
             plt.ylabel('Time (ms)')
             plt.grid(True)
@@ -323,7 +323,7 @@ def analyze_bag(bag_path, output_dir="mpc_plots", show_plots=False):
         plt.figure(figsize=(8, 8))
         plt.plot(positions[:, 0], positions[:, 1], label='Actual Trajectory')
         plt.scatter(initial_pos[0], initial_pos[1], color='red', s=100, zorder=5, label='Target/Start Point')
-        plt.title(f'End-Effector Trajectory (XY Plane) ({base_filename})')
+        plt.title('End-Effector Trajectory (XY Plane))')
         plt.xlabel('X Position (m)')
         plt.ylabel('Y Position (m)')
         plt.grid(True)
