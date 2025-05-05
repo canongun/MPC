@@ -22,12 +22,12 @@ import matplotlib.pyplot as plt
 from tf.transformations import quaternion_from_euler, quaternion_multiply, quaternion_inverse, quaternion_slerp
 
 # Function to load and process MoCap data from TSV file
-def load_mocap_data(filepath, time_col, pos_x_col, pos_y_col, pos_z_col, roll_col, pitch_col, yaw_col, skip_rows):
+def load_mocap_data(filepath, time_col, pos_x_col, pos_y_col, pos_z_col, roll_col, pitch_col, yaw_col, header_row):
     """Loads MoCap data, performs unit conversions, and calculates quaternions."""
     print(f"Loading MoCap data from: {filepath}")
     try:
         # Read the TSV file using pandas
-        df = pd.read_csv(filepath, sep='\t', skiprows=skip_rows)
+        df = pd.read_csv(filepath, sep='\t', header=header_row)
 
         # --- Data Extraction and Validation ---
         required_cols = [time_col, pos_x_col, pos_y_col, pos_z_col, roll_col, pitch_col, yaw_col]
@@ -441,7 +441,7 @@ def plot_results(errors_data, output_dir, base_filename):
     # 1. Relative Position Error Magnitude Plot
     plt.figure(figsize=(12, 6))
     plt.plot(times_rel, errors_data["error_delta_pos_mag"] * 1000) # Convert to mm
-    plt.title(f'Relative Position Error Magnitude ({base_filename})')
+    plt.title('Relative Position Error Magnitude')
     plt.xlabel('Time (s)')
     plt.ylabel('Position Error per Step (mm)')
     plt.grid(True)
@@ -454,7 +454,7 @@ def plot_results(errors_data, output_dir, base_filename):
     # 2. Relative Orientation Error Angle Plot
     plt.figure(figsize=(12, 6))
     plt.plot(times_rel, errors_data["error_delta_angle_deg"]) # Plot in degrees
-    plt.title(f'Relative Orientation Error Angle ({base_filename})')
+    plt.title('Relative Orientation Error Angle')
     plt.xlabel('Time (s)')
     plt.ylabel('Orientation Error per Step (deg)')
     plt.grid(True)
@@ -469,7 +469,7 @@ def plot_results(errors_data, output_dir, base_filename):
     plt.plot(times_rel, errors_data["error_delta_pos"][:, 0] * 1000, label='X Error')
     plt.plot(times_rel, errors_data["error_delta_pos"][:, 1] * 1000, label='Y Error')
     plt.plot(times_rel, errors_data["error_delta_pos"][:, 2] * 1000, label='Z Error')
-    plt.title(f'Relative Position Error Components ({base_filename})')
+    plt.title('Relative Position Error Components')
     plt.xlabel('Time (s)')
     plt.ylabel('Position Error per Step (mm)')
     plt.grid(True)
@@ -497,7 +497,7 @@ def main():
     parser.add_argument("--mocap-roll-col", default="Roll", help="Column name for MoCap Roll.")
     parser.add_argument("--mocap-pitch-col", default="Pitch", help="Column name for MoCap Pitch.")
     parser.add_argument("--mocap-yaw-col", default="Yaw", help="Column name for MoCap Yaw.")
-    parser.add_argument("--skip-rows", type=int, default=14, help="Number of header rows to skip in the MoCap TSV file (default: 14 based on screenshot).") # Adjust if your header changes
+    parser.add_argument("--header-row", type=int, default=13, help="0-indexed row number containing the headers in the MoCap TSV file (default: 13 for row 14).")
     parser.add_argument("--motion-start-pos-thresh", type=float, default=0.01, help="Position change (m) threshold to detect MoCap motion start (default: 0.01).")
     parser.add_argument("--motion-start-vel-thresh", type=float, default=0.01, help="Velocity magnitude (m/s or rad/s) threshold to detect Odom motion start (default: 0.01).")
 
@@ -526,7 +526,7 @@ def main():
         args.mocap_time_col,
         args.mocap_pos_x_col, args.mocap_pos_y_col, args.mocap_pos_z_col,
         args.mocap_roll_col, args.mocap_pitch_col, args.mocap_yaw_col,
-        args.skip_rows
+        args.header_row
     )
     if mocap_data is None:
         print("Error: Failed to load MoCap data.")
