@@ -238,7 +238,7 @@ def plot_results(results, output_dir, base_filename):
     # Plot 1: Position Error
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
     ax1.plot(times_rel, results["e_p"] * 1000, label='Total Position Error')
-    ax1.set_title(f'{base_filename} - End-Effector Position Error')
+    ax1.set_title('End-Effector Position Error')
     ax1.set_ylabel('Position Error (mm)')
     ax1.grid(True)
     ax1.legend()
@@ -256,7 +256,7 @@ def plot_results(results, output_dir, base_filename):
     # Plot 2: Orientation Error
     plt.figure(figsize=(12, 6))
     plt.plot(times_rel, results["e_o"])
-    plt.title(f'{base_filename} - End-Effector Orientation Error')
+    plt.title(f'End-Effector Orientation Error')
     plt.xlabel('Time (s)')
     plt.ylabel('Orientation Error (Quaternion Distance)')
     plt.grid(True)
@@ -268,7 +268,7 @@ def plot_results(results, output_dir, base_filename):
     plt.figure(figsize=(12, 8))
     for i in range(results["u_interp"].shape[1]):
         plt.plot(times_rel, results["u_interp"][:, i], label=f'Joint {i+1} Vel')
-    plt.title(f'{base_filename} - MPC Control Inputs (Joint Velocities)')
+    plt.title('MPC Control Inputs (Joint Velocities)')
     plt.xlabel('Time (s)')
     plt.ylabel('Joint Velocity (rad/s)')
     plt.grid(True)
@@ -280,7 +280,7 @@ def plot_results(results, output_dir, base_filename):
     # Plot 4: Computation Time
     plt.figure(figsize=(12, 6))
     plt.plot(times_rel, results["t_comp_interp"] * 1000)
-    plt.title(f'{base_filename} - MPC Computation Time')
+    plt.title('MPC Computation Time')
     plt.xlabel('Time (s)')
     plt.ylabel('Computation Time (ms)')
     plt.grid(True)
@@ -292,7 +292,7 @@ def plot_results(results, output_dir, base_filename):
     plt.figure(figsize=(8, 8))
     plt.plot(results["positions"][:, 0] * 1000, results["positions"][:, 1] * 1000, label='EE Trajectory')
     plt.scatter(results["p_d"][0] * 1000, results["p_d"][1] * 1000, c='r', marker='x', s=100, label='Target', zorder=5)
-    plt.title(f'{base_filename} - End-Effector Trajectory (XY Plane)')
+    plt.title('End-Effector Trajectory (XY Plane)')
     plt.xlabel('X Position (mm)')
     plt.ylabel('Y Position (mm)')
     plt.grid(True)
