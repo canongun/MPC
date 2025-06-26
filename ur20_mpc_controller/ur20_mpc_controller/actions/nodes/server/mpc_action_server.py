@@ -3,6 +3,7 @@
 import rospy
 import actionlib
 import numpy as np
+from std_msgs.msg import Float64
 from ur20_mpc_controller.msg import MPCAction, MPCFeedback, MPCResult
 from ur20_mpc_controller.models.ur_mpc import URMPC
 from ur20_mpc_controller.models.base_observer import BaseObserver
@@ -46,6 +47,13 @@ class MPCActionServer:
         self.trajectory_client.wait_for_server()
         rospy.loginfo("Trajectory action server connected!")
         
+        # Add publisher for computation time
+        self.computation_time_pub = rospy.Publisher(
+            '/mpc_controller/computation_time', 
+            Float64, 
+            queue_size=10
+        )
+        
         # Start the server
         self.server.start()
         rospy.loginfo("MPC Action Server is ready")
@@ -84,22 +92,30 @@ class MPCActionServer:
             }
             
             # Get base state from observer
+            if not self.base_observer.is_ready():
+                 rospy.logwarn_throttle(1.0, "Waiting for initial base odometry...")
+                 rate.sleep()
+                 continue # Skip cycle if no odom yet
+
             base_state = self.base_observer.get_base_state()
             
-            # Compute control
-            control = self.mpc.compute_control(
+            # Compute control and get computation time
+            control, computation_time = self.mpc.compute_control(
                 current_joint_state,
                 current_ee_pose,
                 target_ee_pose,
                 base_state
             )
+
+            # Publish computation time
+            self.computation_time_pub.publish(Float64(computation_time))
             
             # Predict next joint positions
             next_joint_positions = current_joint_positions + control * self.mpc.dt
             
             # Create and send trajectory
-            goal = FollowJointTrajectoryGoal()
-            goal.trajectory.joint_names = [
+            traj_goal = FollowJointTrajectoryGoal()
+            traj_goal.trajectory.joint_names = [
                 'shoulder_pan_joint',
                 'shoulder_lift_joint',
                 'elbow_joint',
@@ -119,40 +135,51 @@ class MPCActionServer:
             next_point.velocities = control.tolist()
             next_point.time_from_start = rospy.Duration(self.mpc.dt)
             
-            goal.trajectory.points = [current_point, next_point]
+            traj_goal.trajectory.points = [current_point, next_point]
             
             # Send trajectory goal
-            self.trajectory_client.send_goal(goal)
+            self.trajectory_client.send_goal(traj_goal)
             
             # Send feedback
             feedback = MPCFeedback()
-            feedback.current_position = current_ee_pose['position'].tolist()
-            feedback.current_orientation = current_ee_pose['orientation'].tolist()
-            feedback.joint_velocities = control.tolist()
-            self.server.publish_feedback(feedback)
-            
-            # Update states
-            current_joint_positions = next_joint_positions
-            current_pose = self.move_group.get_current_pose(
+            # Read current pose *after* control calculation but *before* sleeping
+            # to get the pose corresponding to the state used in the calculation
+            # (Assuming get_current_pose is relatively fast)
+            current_pose_feedback = self.move_group.get_current_pose(
                 end_effector_link="gripper_end_tool_link"
             ).pose
-            current_ee_pose['position'] = np.array([
-                current_pose.position.x,
-                current_pose.position.y,
-                current_pose.position.z
+            current_ee_pose_feedback_pos = np.array([
+                current_pose_feedback.position.x,
+                current_pose_feedback.position.y,
+                current_pose_feedback.position.z
             ])
-            current_ee_pose['orientation'] = np.array(euler_from_quaternion([
-                current_pose.orientation.x,
-                current_pose.orientation.y,
-                current_pose.orientation.z,
-                current_pose.orientation.w
+            current_ee_pose_feedback_ori = np.array(euler_from_quaternion([
+                current_pose_feedback.orientation.x,
+                current_pose_feedback.orientation.y,
+                current_pose_feedback.orientation.z,
+                current_pose_feedback.orientation.w
             ]))
+
+            feedback.current_position = current_ee_pose_feedback_pos.tolist()
+            feedback.current_orientation = current_ee_pose_feedback_ori.tolist() # Convert to Euler for feedback if needed, or keep quaternion
+            feedback.joint_velocities = control.tolist()
+            feedback.computation_time = computation_time # Add computation time to feedback
+            self.server.publish_feedback(feedback)
+            
+            # Update states for the *next* iteration
+            current_joint_positions = next_joint_positions # This is the predicted next state
+            # Update current_ee_pose based on the *actual* latest pose read for feedback
+            current_ee_pose['position'] = current_ee_pose_feedback_pos 
+            current_ee_pose['orientation'] = current_ee_pose_feedback_ori
+
+            # (Optional): Add a check for trajectory client state if needed
+            # self.trajectory_client.wait_for_result(rospy.Duration(self.mpc.dt * 0.9)) # Example wait
             
             rate.sleep()
         
         # Set result
         result = MPCResult()
-        result.success = True
+        result.success = True # Or determine success based on final state/error
         self.server.set_succeeded(result)
 
 if __name__ == '__main__':

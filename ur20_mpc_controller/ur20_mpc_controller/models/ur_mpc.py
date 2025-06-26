@@ -4,6 +4,7 @@ import rospy
 import numpy as np
 from scipy.optimize import minimize
 from typing import Dict, Tuple, List
+import time
 
 from ur20_mpc_controller.models.ur20_dynamics import UR20Dynamics
 
@@ -84,7 +85,7 @@ class URMPC:
                 current_joint_state: Dict,
                 current_ee_pose: Dict,
                 target_ee_pose: Dict,
-                base_state: Dict) -> np.ndarray:
+                base_state: Dict) -> Tuple[np.ndarray, float]:
         """Compute optimal control action using MPC
         
         Args:
@@ -95,18 +96,21 @@ class URMPC:
             
         Returns:
             Optimal joint velocity commands
+            Computation time for this step (in seconds)
             
         Raises:
             OptimizationError: If optimization fails to converge
             ValueError: If inputs are invalid
         """
+        start_time = time.time()
         try:
             # Check both linear and angular velocity
             base_vel_mag = np.linalg.norm(base_state['linear_velocity'])
             base_ang_mag = np.linalg.norm(base_state['angular_velocity'])
             
             if base_vel_mag < 0.01 and base_ang_mag < 0.01:
-                return np.zeros(self.dynamics.n_controls)
+                end_time = time.time()
+                return np.zeros(self.dynamics.n_controls), end_time - start_time
 
             # 1. Get relevant states in world frame
             platform_pos_w = base_state['position']
@@ -234,17 +238,22 @@ class URMPC:
             max_joint_vel = 0.5  # rad/s
             control = np.clip(control, -max_joint_vel, max_joint_vel)
             
-            return control
+            end_time = time.time()
+            return control, end_time - start_time
             
         except OptimizationError as e:
             rospy.logerr(f"Optimization error: {str(e)}")
-            return initial_vel
+            end_time = time.time()
+            fallback_control = initial_vel if 'initial_vel' in locals() else np.zeros(self.dynamics.n_controls)
+            return fallback_control, end_time - start_time
         except ValueError as e:
             rospy.logerr(f"Invalid input: {str(e)}")
-            return np.zeros(self.dynamics.n_controls)
+            end_time = time.time()
+            return np.zeros(self.dynamics.n_controls), end_time - start_time
         except Exception as e:
             rospy.logerr(f"Unexpected error: {str(e)}")
-            return np.zeros(self.dynamics.n_controls)
+            end_time = time.time()
+            return np.zeros(self.dynamics.n_controls), end_time - start_time
 
     def calculate_stage_cost(self, state, target_ee_pose, base_state, control, k):
         """Calculate cost for a single stage in the prediction horizon"""
@@ -712,7 +721,7 @@ class URMPC:
     # ------------------------------------------------------------------
     # Helper: rotate vectors from WORLD → ARM-BASE frame
     def _world_to_base(self, vec_w: np.ndarray, yaw: float) -> np.ndarray:
-        """Rotate a 3-D vector from world frame into the robot’s base-link frame."""
+        """Rotate a 3-D vector from world frame into the robot's base-link frame."""
         c, s = np.cos(yaw), np.sin(yaw)
         R = np.array([[ c,  s, 0],
                       [-s,  c, 0],
@@ -750,7 +759,7 @@ def main():
     }
     
     # Compute control
-    control = controller.compute_control(
+    control, duration = controller.compute_control(
         current_joint_state,
         current_ee_pose,
         target_ee_pose,
@@ -758,6 +767,7 @@ def main():
     )
     
     rospy.loginfo(f"Computed control: {control}")
+    rospy.loginfo(f"Computation time: {duration:.4f} seconds")
 
 if __name__ == '__main__':
     try:
